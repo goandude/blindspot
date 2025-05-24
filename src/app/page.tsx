@@ -8,15 +8,15 @@ import { VideoChatPlaceholder } from '@/components/features/chat/video-chat-plac
 import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
 import type { UserProfile } from '@/types';
-import { Zap, Users, MessageSquare, Repeat, VideoOff, MicOff, Video, Mic } from 'lucide-react';
+import { Zap, Users, MessageSquare, Repeat } from 'lucide-react';
 import { db } from '@/lib/firebase';
-import { ref, set, onValue, off, remove, runTransaction, type Unsubscribe, type DatabaseReference } from 'firebase/database';
+import { ref, set, onValue, off, remove, runTransaction, type Unsubscribe, type DatabaseReference, push } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 
 type ChatState = 'idle' | 'searching' | 'connecting' | 'connected' | 'revealed';
 
 const mockCurrentUser: UserProfile = {
-  id: 'user1', // This will be overridden by dynamic userId
+  id: 'user1', 
   name: 'Alex Miller',
   photoUrl: 'https://placehold.co/300x300.png',
   dataAiHint: 'man smiling',
@@ -24,14 +24,13 @@ const mockCurrentUser: UserProfile = {
 };
 
 const mockMatchedUser: UserProfile = {
-  id: 'user2', // This will be dynamic if we fetch profile later
+  id: 'user2', 
   name: 'Samira Jones',
   photoUrl: 'https://placehold.co/300x300.png',
   dataAiHint: 'woman laughing',
   bio: 'Loves painting, long walks in nature, and discovering hidden gems in the city. Creative soul.',
 };
 
-// For WebRTC
 const servers = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -46,7 +45,6 @@ export default function HomePage() {
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [currentUserProfile, setCurrentUserProfile] = useState<UserProfile>(mockCurrentUser);
-  // Matched user profile could be fetched if we store profile data against user IDs
   const [matchedUserProfile] = useState<UserProfile>(mockMatchedUser); 
 
   const { toast } = useToast();
@@ -57,6 +55,11 @@ export default function HomePage() {
   const peerIdRef = useRef<string | null>(null);
   const isCallerRef = useRef<boolean>(false);
   const firebaseListenersRef = useRef<Array<{ ref: DatabaseReference; unsubscribe: Unsubscribe }>>([]);
+  const chatStateRef = useRef<ChatState>(chatState);
+
+  useEffect(() => {
+    chatStateRef.current = chatState;
+  }, [chatState]);
 
   const cleanupFirebaseListeners = useCallback(() => {
     firebaseListenersRef.current.forEach(({ unsubscribe }) => {
@@ -88,75 +91,125 @@ export default function HomePage() {
   const cleanupCallData = useCallback(async () => {
     if (userIdRef.current) {
       const userCallInfoRef = ref(db, `calls/${userIdRef.current}`);
-      remove(userCallInfoRef);
+      await remove(userCallInfoRef).catch(e => console.warn("Error removing user call info:", e));
     }
     if (roomIdRef.current) {
       const roomDataRef = ref(db, `rooms/${roomIdRef.current}`);
-      // Only the caller (or first part of room ID) should ideally clear the room, or use a 'disconnected' flag.
-      // For simplicity, both attempt to remove. This might cause a benign "permission_denied" if already removed.
       if (isCallerRef.current || (roomIdRef.current && userIdRef.current && roomIdRef.current.startsWith(userIdRef.current))) {
-         remove(roomDataRef);
+         await remove(roomDataRef).catch(e => console.warn("Error removing room data:", e));
       }
     }
   }, []);
 
-
   useEffect(() => {
-    // Generate a unique ID for this user session
     const newUserId = `user_${Math.random().toString(36).substring(2, 10)}`;
     userIdRef.current = newUserId;
     setCurrentUserProfile(prev => ({ ...prev, id: newUserId }));
 
     return () => {
-      // Global cleanup on component unmount
       cleanupWebRTC();
       cleanupFirebaseListeners();
       if (userIdRef.current) {
         const queueRef = ref(db, `queue/${userIdRef.current}`);
-        remove(queueRef); // Remove from queue if still there
+        remove(queueRef); 
       }
       cleanupCallData();
     };
   }, [cleanupWebRTC, cleanupFirebaseListeners, cleanupCallData]);
 
+  const handleEndCall = useCallback(async (showReveal = true) => {
+    console.log("handleEndCall called, showReveal:", showReveal);
+    cleanupWebRTC();
+    cleanupFirebaseListeners(); 
+    await cleanupCallData();
+    
+    if (showReveal) {
+        setChatState('revealed');
+    } else {
+        setChatState('idle');
+    }
+    roomIdRef.current = null;
+    peerIdRef.current = null;
+    isCallerRef.current = false;
 
-  const initializePeerConnection = useCallback(() => {
-    if (!localStream || !userIdRef.current) return null;
+  }, [cleanupWebRTC, cleanupFirebaseListeners, cleanupCallData]); // Added async/await to cleanupCallData
+
+  const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
+    if (!userIdRef.current) {
+        console.error("initializePeerConnection: userIdRef is not set.");
+        return null;
+    }
+    if (!currentLocalStream) {
+        console.error("initializePeerConnection: currentLocalStream is null.");
+        return null;
+    }
 
     const pc = new RTCPeerConnection(servers);
 
-    localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    currentLocalStream.getTracks().forEach(track => {
+      try {
+        pc.addTrack(track, currentLocalStream);
+      } catch (e) {
+        console.error("Error adding track to PeerConnection:", e, track, currentLocalStream);
+        toast({ title: "WebRTC Error", description: "Could not add media track to the connection.", variant: "destructive" });
+      }
+    });
 
     pc.ontrack = (event) => {
+      console.log("Remote track received:", event.track, event.streams);
       if (event.streams && event.streams[0]) {
         setRemoteStream(event.streams[0]);
+      } else {
+        const newStream = new MediaStream();
+        newStream.addTrack(event.track);
+        setRemoteStream(newStream);
       }
     };
     
     pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'connected') {
+      const currentPc = peerConnectionRef.current; // Use the ref to get the most current PC
+      if (!currentPc) return;
+
+      console.log(`ICE connection state: ${currentPc.iceConnectionState}`);
+      if (currentPc.iceConnectionState === 'connected') {
         setChatState('connected');
-      } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed') {
-        toast({ title: "Connection Lost", description: "The connection with the peer was lost.", variant: "destructive"});
-        handleEndCall(false); // Don't show reveal screen on connection drop
+      } else if (
+        currentPc.iceConnectionState === 'failed' || 
+        currentPc.iceConnectionState === 'disconnected' || 
+        currentPc.iceConnectionState === 'closed'
+      ) {
+        if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
+            toast({ title: "Connection Issue", description: `Call state: ${currentPc.iceConnectionState}.`, variant: currentPc.iceConnectionState === 'failed' ? "destructive" : "default"});
+        }
+        if (currentPc.iceConnectionState === 'failed') {
+            handleEndCall(false); 
+        } else if (currentPc.iceConnectionState === 'closed' && chatStateRef.current !== 'revealed' && chatStateRef.current !== 'idle') {
+            // If closed and we didn't actively end it, consider it ended.
+            handleEndCall(false);
+        }
       }
     };
 
-    peerConnectionRef.current = pc;
+    pc.onsignalingstatechange = () => {
+        if(peerConnectionRef.current) { // Check ref
+            console.log(`Signaling state change: ${peerConnectionRef.current.signalingState}`);
+        }
+    };
+    
     return pc;
-  }, [localStream, toast]);
+  }, [toast, handleEndCall]);
 
 
   const initiateCallSequence = useCallback(async (currentRoomId: string, peerPc: RTCPeerConnection) => {
     if (!peerPc || !userIdRef.current || !peerIdRef.current) return;
 
     const roomRef = ref(db, `rooms/${currentRoomId}`);
-    const offerCandidatesRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
-    const answerCandidatesRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
+    const offerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
+    const answerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
 
     peerPc.onicecandidate = (event) => {
       if (event.candidate) {
-        set(ref(db, `rooms/${currentRoomId}/callerCandidates/${event.candidate.sdpMid}_${event.candidate.sdpMLineIndex}`), event.candidate.toJSON());
+        push(offerCandidatesCollectionRef, event.candidate.toJSON());
       }
     };
 
@@ -167,7 +220,7 @@ export default function HomePage() {
     const answerListener = onValue(ref(roomRef, 'answer'), async (snapshot) => {
       if (snapshot.exists()) {
         const answer = snapshot.val();
-        if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) { // Check signalingState
+        if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) {
           try {
             await peerPc.setRemoteDescription(new RTCSessionDescription(answer));
           } catch (e) {
@@ -178,15 +231,15 @@ export default function HomePage() {
     });
     firebaseListenersRef.current.push({ ref: ref(roomRef, 'answer'), unsubscribe: answerListener });
 
-    const calleeIceCandidatesListener = onValue(answerCandidatesRef, (snapshot) => {
+    const calleeIceCandidatesListener = onValue(answerCandidatesCollectionRef, (snapshot) => {
       snapshot.forEach((childSnapshot) => {
         const candidate = childSnapshot.val();
-        if (candidate && peerPc.currentRemoteDescription) { // Only add if remote description is set
+        if (candidate && peerPc.currentRemoteDescription && peerPc.signalingState !== 'closed') {
           peerPc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding received ICE candidate (callee):", e));
         }
       });
     });
-    firebaseListenersRef.current.push({ ref: answerCandidatesRef, unsubscribe: calleeIceCandidatesListener });
+    firebaseListenersRef.current.push({ ref: answerCandidatesCollectionRef, unsubscribe: calleeIceCandidatesListener });
 
   }, []);
 
@@ -194,12 +247,12 @@ export default function HomePage() {
     if (!peerPc || !userIdRef.current || !peerIdRef.current) return;
 
     const roomRef = ref(db, `rooms/${currentRoomId}`);
-    const offerCandidatesRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
-    const answerCandidatesRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
+    const offerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
+    const answerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
 
     peerPc.onicecandidate = (event) => {
       if (event.candidate) {
-        set(ref(db, `rooms/${currentRoomId}/calleeCandidates/${event.candidate.sdpMid}_${event.candidate.sdpMLineIndex}`), event.candidate.toJSON());
+        push(answerCandidatesCollectionRef, event.candidate.toJSON());
       }
     };
     
@@ -220,29 +273,28 @@ export default function HomePage() {
     });
     firebaseListenersRef.current.push({ ref: ref(roomRef, 'offer'), unsubscribe: offerListener });
 
-    const callerIceCandidatesListener = onValue(offerCandidatesRef, (snapshot) => {
+    const callerIceCandidatesListener = onValue(offerCandidatesCollectionRef, (snapshot) => {
       snapshot.forEach((childSnapshot) => {
         const candidate = childSnapshot.val();
-         if (candidate && peerPc.currentRemoteDescription) {
+         if (candidate && peerPc.currentRemoteDescription && peerPc.signalingState !== 'closed') {
           peerPc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding received ICE candidate (caller):", e));
         }
       });
     });
-    firebaseListenersRef.current.push({ ref: offerCandidatesRef, unsubscribe: callerIceCandidatesListener });
+    firebaseListenersRef.current.push({ ref: offerCandidatesCollectionRef, unsubscribe: callerIceCandidatesListener });
 
   }, []);
 
   const startLocalStream = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream);
+      setLocalStream(stream); // For UI and cleanup
       setIsVideoOn(true);
       setIsMicOn(true);
-      return stream;
+      return stream; // Return for immediate use
     } catch (err) {
       console.error("Error accessing media devices.", err);
       toast({ title: "Media Error", description: "Could not access camera/microphone. Please check permissions.", variant: "destructive" });
-      setChatState('idle');
       return null;
     }
   };
@@ -250,30 +302,35 @@ export default function HomePage() {
   const handleStartChat = async () => {
     if (!userIdRef.current) return;
     
-    cleanupWebRTC();
-    cleanupFirebaseListeners();
-    await cleanupCallData();
+    console.log("Starting chat initiation...");
+    await cleanupWebRTC(); // ensure await
+    cleanupFirebaseListeners(); // this is sync
+    await cleanupCallData(); // ensure await
     
     setChatState('searching');
     roomIdRef.current = null;
     peerIdRef.current = null;
 
     const stream = await startLocalStream();
-    if (!stream) return;
+    if (!stream) {
+      setChatState('idle'); // Reset state if stream fails
+      return;
+    }
     
-    const pc = initializePeerConnection(); // Initialize with the new local stream
+    // Initialize PeerConnection with the obtained stream
+    const pc = initializePeerConnection(stream); 
     if (!pc) {
       toast({ title: "Error", description: "Failed to initialize video call components.", variant: "destructive"});
       setChatState('idle');
+      await cleanupWebRTC(); // Cleanup if PC init fails early
       return;
     }
+    peerConnectionRef.current = pc; // Set the ref after successful initialization
 
-    // Listen for incoming calls
     const currentUserCallRef = ref(db, `calls/${userIdRef.current}`);
     const callListener = onValue(currentUserCallRef, (snapshot) => {
-      if (snapshot.exists() && snapshot.val().role === 'callee' && !roomIdRef.current) { // Ensure not already in a room
+      if (snapshot.exists() && snapshot.val().role === 'callee' && !roomIdRef.current && chatStateRef.current === 'searching') { 
         const callData = snapshot.val();
-        // Detach this specific listener once triggered
         const listenerIndex = firebaseListenersRef.current.findIndex(l => l.ref.toString() === currentUserCallRef.toString());
         if (listenerIndex > -1) {
             firebaseListenersRef.current[listenerIndex].unsubscribe();
@@ -287,7 +344,12 @@ export default function HomePage() {
         peerIdRef.current = callData.peerId;
         isCallerRef.current = false;
         setChatState('connecting');
-        answerCallSequence(callData.roomId, pc);
+        if (peerConnectionRef.current) { // Check if pc is still valid
+            answerCallSequence(callData.roomId, peerConnectionRef.current);
+        } else {
+            console.error("PeerConnection not available for answerCallSequence");
+            handleEndCall(false);
+        }
       }
     }, (error) => {
       console.error("Firebase onValue error for calls:", error);
@@ -295,33 +357,41 @@ export default function HomePage() {
     });
     firebaseListenersRef.current.push({ ref: currentUserCallRef, unsubscribe: callListener });
 
-
-    // Attempt to find a match or join the queue
     const queueDbRef = ref(db, `queue`);
     runTransaction(queueDbRef, (currentQueueData) => {
+      if (chatStateRef.current !== 'searching' && chatStateRef.current !== 'idle') { // Avoid race if already connecting/connected
+        return; // Abort transaction
+      }
       if (currentQueueData === null) {
         return { [userIdRef.current!]: { timestamp: Date.now() } };
       }
       const availableUserIds = Object.keys(currentQueueData).filter(id => id !== userIdRef.current);
       
       if (availableUserIds.length > 0) {
-        const peerToCall = availableUserIds.sort((a,b) => currentQueueData[a].timestamp - currentQueueData[b].timestamp)[0]; // Oldest user
+        const peerToCall = availableUserIds.sort((a,b) => currentQueueData[a].timestamp - currentQueueData[b].timestamp)[0]; 
         delete currentQueueData[peerToCall];
-        if (currentQueueData[userIdRef.current!]) delete currentQueueData[userIdRef.current!]; // remove self too if added previously
+        if (currentQueueData[userIdRef.current!]) delete currentQueueData[userIdRef.current!];
 
         isCallerRef.current = true;
         peerIdRef.current = peerToCall;
         const newRoomId = `${userIdRef.current}_${peerToCall}`;
         roomIdRef.current = newRoomId;
         
-        // Perform these writes outside transaction to avoid nesting
         Promise.all([
           set(ref(db, `calls/${peerToCall}`), { roomId: newRoomId, role: 'callee', peerId: userIdRef.current }),
           set(ref(db, `calls/${userIdRef.current!}`), { roomId: newRoomId, role: 'caller', peerId: peerToCall })
         ]).then(() => {
           setChatState('connecting');
-          initiateCallSequence(newRoomId, pc);
-        }).catch(e => console.error("Error setting up call roles:", e));
+           if (peerConnectionRef.current) { // Check if pc is still valid
+             initiateCallSequence(newRoomId, peerConnectionRef.current);
+           } else {
+            console.error("PeerConnection not available for initiateCallSequence");
+            handleEndCall(false);
+           }
+        }).catch(e => {
+            console.error("Error setting up call roles:", e);
+            handleEndCall(false);
+        });
         
         return currentQueueData;
       } else {
@@ -332,31 +402,12 @@ export default function HomePage() {
       console.error("Queue transaction error:", error);
       toast({ title: "Matching Error", description: "Could not join the matching queue.", variant: "destructive" });
       setChatState('idle');
-      cleanupWebRTC();
+      cleanupWebRTC(); // ensure await if it becomes async
     });
   };
 
-  const handleEndCall = useCallback((showReveal = true) => {
-    cleanupWebRTC();
-    cleanupFirebaseListeners(); // Detach all active listeners
-    cleanupCallData();
-    
-    if (showReveal) {
-        setChatState('revealed');
-    } else {
-        setChatState('idle');
-    }
-    // Reset refs for next call
-    roomIdRef.current = null;
-    peerIdRef.current = null;
-    isCallerRef.current = false;
-
-  }, [cleanupWebRTC, cleanupFirebaseListeners, cleanupCallData]);
-
-
-  const handleFindNew = () => {
-    handleEndCall(false); // Clean up current state without revealing
-    // Delay slightly to allow cleanup then start new chat
+  const handleFindNew = async () => {
+    await handleEndCall(false); 
     setTimeout(() => {
         handleStartChat();
     }, 100);
@@ -414,7 +465,7 @@ export default function HomePage() {
               End Chat & Reveal Profiles
             </Button>
             <ReportDialog 
-              reportedUser={null} // For anonymous phase
+              reportedUser={null} 
               triggerButtonText="Report Anonymous User"
               triggerButtonVariant="destructive"
               triggerButtonFullWidth={true} 
@@ -428,7 +479,7 @@ export default function HomePage() {
           <h2 className="text-3xl font-semibold text-primary">Profiles Revealed!</h2>
           <div className="grid md:grid-cols-2 gap-8 w-full">
             <UserProfileCard user={currentUserProfile} />
-            <UserProfileCard user={matchedUserProfile} /> {/* Using mock matched user */}
+            <UserProfileCard user={matchedUserProfile} /> 
           </div>
           <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md mt-4">
             <Button onClick={handleFindNew} size="lg" variant="secondary" className="flex-1">
@@ -436,7 +487,7 @@ export default function HomePage() {
               Find Someone New
             </Button>
             <ReportDialog 
-              reportedUser={matchedUserProfile} // Use actual matched user data if available
+              reportedUser={matchedUserProfile} 
               triggerButtonText={`Report ${matchedUserProfile.name}`}
               triggerButtonVariant="destructive"
               triggerButtonFullWidth={true}
@@ -447,3 +498,5 @@ export default function HomePage() {
     </MainLayout>
   );
 }
+
+      
