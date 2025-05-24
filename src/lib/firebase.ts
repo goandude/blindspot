@@ -6,7 +6,7 @@ import { getDatabase, type Database } from "firebase/database";
 const firebaseConfig = {
   apiKey: "YOUR_API_KEY", // Replace
   authDomain: "YOUR_AUTH_DOMAIN", // Replace
-  databaseURL: "YOUR_DATABASE_URL", // Replace - This is crucial for Realtime Database
+  databaseURL: "https://astute-helper-451908-q3-default-rtdb.firebaseio.com/", // Updated
   projectId: "YOUR_PROJECT_ID", // Replace
   storageBucket: "YOUR_STORAGE_BUCKET", // Replace
   messagingSenderId: "YOUR_MESSAGING_SENDER_ID", // Replace
