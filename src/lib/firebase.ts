@@ -5,13 +5,14 @@ import { getAuth, GoogleAuthProvider, type Auth } from "firebase/auth";
 
 // IMPORTANT: Replace placeholder values with your actual Firebase configuration
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY", // Replace
-  authDomain: "YOUR_AUTH_DOMAIN", // Replace
-  databaseURL: "https://astute-helper-451908-q3-default-rtdb.firebaseio.com/", // This was set as per your request
-  projectId: "YOUR_PROJECT_ID", // Replace
-  storageBucket: "YOUR_STORAGE_BUCKET", // Replace
-  messagingSenderId: "YOUR_MESSAGING_SENDER_ID", // Replace
-  appId: "YOUR_APP_ID" // Replace
+  apiKey: "AIzaSyDphKB2KnXoOQSNhcGhLrk0LLw3SqgwXwQ",
+  authDomain: "astute-helper-451908-q3.firebaseapp.com",
+  databaseURL: "https://astute-helper-451908-q3-default-rtdb.firebaseio.com",
+  projectId: "astute-helper-451908-q3",
+  storageBucket: "astute-helper-451908-q3.firebasestorage.app",
+  messagingSenderId: "309234429946",
+  appId: "1:309234429946:web:288ea4fd39298e7f5abe43",
+  measurementId: "G-9DZBLN4XCJ"
 };
 
 // Pre-initialization check for placeholder values

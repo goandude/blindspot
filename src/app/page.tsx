@@ -5,13 +5,12 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { UserProfileCard } from '@/components/features/profile/user-profile-card';
 import { VideoChatPlaceholder } from '@/components/features/chat/video-chat-placeholder';
-import { QueuedUsersPanel } from '@/components/features/queue/queued-users-panel';
 import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
-import type { UserProfile } from '@/types';
-import { Zap, Users, MessageSquare, Repeat, LogIn, LogOut, UserCircle, Edit3 } from 'lucide-react';
+import type { UserProfile, OnlineUser, IncomingCallOffer, CallAnswer } from '@/types';
+import { Edit3, LogOut, PhoneIncoming, PhoneOff, Video as VideoIcon, UserCircle } from 'lucide-react';
 import { db } from '@/lib/firebase';
-import { ref, set, onValue, off, remove, runTransaction, type Unsubscribe, type DatabaseReference, push, serverTimestamp } from 'firebase/database';
+import { ref, set, onValue, off, remove, serverTimestamp, push, child, get, Unsubscribe } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 import { useAuth } from '@/hooks/use-auth';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -19,17 +18,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
+import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+import { OnlineUsersPanel } from '@/components/features/online-users/online-users-panel';
 
-
-type ChatState = 'idle' | 'searching' | 'connecting' | 'connected' | 'revealed';
-
-const mockMatchedUser: UserProfile = {
-  id: 'user2',
-  name: 'Samira Jones',
-  photoUrl: 'https://placehold.co/300x300.png',
-  dataAiHint: 'woman laughing',
-  bio: 'Loves painting, long walks in nature, and discovering hidden gems in the city. Creative soul.',
-};
+type ChatState = 'idle' | 'dialing' | 'connecting' | 'connected' | 'revealed' | 'receiving_call';
 
 const servers = {
   iceServers: [
@@ -39,50 +32,48 @@ const servers = {
 };
 
 export default function HomePage() {
-  const { user: firebaseUser, profile: currentUserProfile, loading: authLoading, signInWithGoogle, signOut, updateUserProfile } = useAuth();
+  const { user: firebaseUser, profile: currentUserProfile, loading: authLoading, signOut, updateUserProfile } = useAuth();
   const [chatState, setChatState] = useState<ChatState>('idle');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
-  const [queuedUserIds, setQueuedUserIds] = useState<string[]>([]);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [editableProfile, setEditableProfile] = useState<Partial<UserProfile>>({});
-
+  const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
+  const [incomingCall, setIncomingCall] = useState<IncomingCallOffer | null>(null);
+  const [peerProfile, setPeerProfile] = useState<UserProfile | null>(null);
 
   const { toast } = useToast();
 
-  const userIdRef = useRef<string | null>(null); // Will be set to firebaseUser.uid
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const roomIdRef = useRef<string | null>(null);
-  const peerIdRef = useRef<string | null>(null);
+  const peerIdRef = useRef<string | null>(null); // ID of the user we are calling or being called by
   const isCallerRef = useRef<boolean>(false);
-  const firebaseListenersRef = useRef<Array<{ ref: DatabaseReference; unsubscribe: Unsubscribe }>>([]);
-  const chatStateRef = useRef<ChatState>(chatState);
+  const firebaseListenersRef = useRef<Array<{ path: string; unsubscribe: Unsubscribe }>>([]);
+  const chatStateRef = useRef<ChatState>(chatState); // To access current chat state in callbacks
 
   useEffect(() => {
     chatStateRef.current = chatState;
   }, [chatState]);
-
+  
+  // Update editable profile when currentUserProfile changes
   useEffect(() => {
     if (currentUserProfile) {
-      userIdRef.current = currentUserProfile.id;
-       // Pre-fill editable profile when current user profile loads or changes
       setEditableProfile({
         name: currentUserProfile.name,
         bio: currentUserProfile.bio,
+        photoUrl: currentUserProfile.photoUrl,
       });
-    } else {
-      userIdRef.current = null;
     }
   }, [currentUserProfile]);
-  
+
   const handleOpenProfileModal = () => {
     if (currentUserProfile) {
       setEditableProfile({
         name: currentUserProfile.name,
         bio: currentUserProfile.bio,
-        // photoUrl can be added if you implement photo uploads
+        photoUrl: currentUserProfile.photoUrl,
       });
       setIsProfileModalOpen(true);
     }
@@ -91,55 +82,127 @@ export default function HomePage() {
   const handleSaveProfile = async () => {
     if (!currentUserProfile || !firebaseUser) return;
     const updates: Partial<UserProfile> = {};
-    if (editableProfile.name && editableProfile.name !== currentUserProfile.name) {
-      updates.name = editableProfile.name;
-    }
-    if (editableProfile.bio && editableProfile.bio !== currentUserProfile.bio) {
-      updates.bio = editableProfile.bio;
-    }
+    if (editableProfile.name && editableProfile.name !== currentUserProfile.name) updates.name = editableProfile.name;
+    if (editableProfile.bio && editableProfile.bio !== currentUserProfile.bio) updates.bio = editableProfile.bio;
+    if (editableProfile.photoUrl && editableProfile.photoUrl !== currentUserProfile.photoUrl) updates.photoUrl = editableProfile.photoUrl;
+
 
     if (Object.keys(updates).length > 0) {
       await updateUserProfile(firebaseUser.uid, updates);
+      // If name or photoUrl changed, update online presence
+      if (updates.name || updates.photoUrl) {
+        const onlineUserRef = ref(db, `onlineUsers/${firebaseUser.uid}`);
+        const currentPresenceData = (await get(onlineUserRef)).val();
+        if (currentPresenceData) {
+          await set(onlineUserRef, {
+            ...currentPresenceData,
+            name: updates.name || currentPresenceData.name,
+            photoUrl: updates.photoUrl || currentPresenceData.photoUrl,
+          });
+        }
+      }
     }
     setIsProfileModalOpen(false);
   };
-
-
-  // Firebase queue listener setup
+  
+  // Presence system and online users listener
   useEffect(() => {
-    const queueOverallRef = ref(db, 'queue');
-    const queueListener = onValue(queueOverallRef, (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        const allIdsInQueue = Object.keys(data);
-        setQueuedUserIds(allIdsInQueue.filter(id => id !== userIdRef.current));
-      } else {
-        setQueuedUserIds([]);
+    if (!firebaseUser || !currentUserProfile) return;
+
+    const currentUserId = firebaseUser.uid;
+    const userStatusRef = ref(db, `onlineUsers/${currentUserId}`);
+    const presenceData: OnlineUser = {
+      id: currentUserId,
+      name: currentUserProfile.name,
+      photoUrl: currentUserProfile.photoUrl,
+    };
+    set(userStatusRef, presenceData);
+    const onDisconnectRef = ref(db, `onlineUsers/${currentUserId}`);
+    remove(onDisconnectRef).catch(() => {}); // Clear previous onDisconnect
+    onValue(ref(db, '.info/connected'), (snapshot) => {
+      if (snapshot.val() === true) {
+        set(userStatusRef, presenceData);
+        // Set onDisconnect to remove user
+        remove(onDisconnectRef).catch(() => {}); // ensure this is a new onDisconnect
+        set(onDisconnectRef, null, {onDisconnect: {remove: () => {}}}); // More robust onDisconnect
+        
+        // For older Firebase SDKs or specific configurations, `set(ref, null).onDisconnect().remove()` might be needed.
+        // The current way using onDisconnect.remove() is cleaner if supported.
+        // Let's try the Firebase docs recommended way if the above doesn't work robustly:
+        const onDisconnectRemove = ref(db, `onlineUsers/${currentUserId}`);
+        onValue(ref(db, '.info/connected'), (snapshot) => {
+            if (snapshot.val() === false) { return; } // not connected
+            set(onDisconnectRemove, null).catch(()=>{}); // Clear previous onDisconnect
+            set(onDisconnectRemove, presenceData).then(() => {
+                return onDisconnectRemove.onDisconnect().remove();
+            }).catch(err => console.error("Error setting onDisconnect:", err));
+        });
+
       }
     });
-    firebaseListenersRef.current.push({ ref: queueOverallRef, unsubscribe: queueListener });
+    
+
+    const onlineUsersRefPath = 'onlineUsers';
+    const onlineUsersListener = onValue(ref(db, onlineUsersRefPath), (snapshot) => {
+      const users = snapshot.val();
+      const userList: OnlineUser[] = users ? Object.values(users) : [];
+      setOnlineUsers(userList);
+    });
+    addFirebaseListener(onlineUsersRefPath, onlineUsersListener);
 
     return () => {
-      firebaseListenersRef.current.find(l => l.ref === queueOverallRef)?.unsubscribe();
-      firebaseListenersRef.current = firebaseListenersRef.current.filter(l => l.ref !== queueOverallRef);
+      remove(userStatusRef); // Clean up user presence on component unmount (e.g., logout)
+      removeFirebaseListener(onlineUsersRefPath);
     };
-  }, []); // Empty dependency: sets up general queue listener once
+  }, [firebaseUser, currentUserProfile]);
 
-  const cleanupFirebaseListeners = useCallback(() => {
-    const callSpecificListeners = firebaseListenersRef.current.filter(
-        l => !l.ref.toString().includes('/queue') // Keep the general queue listener
-    );
-    callSpecificListeners.forEach(({ unsubscribe }) => {
+  // Listener for incoming calls
+  useEffect(() => {
+    if (!currentUserProfile) return;
+    const incomingCallPath = `callSignals/${currentUserProfile.id}/pendingOffer`;
+    const incomingCallListener = onValue(ref(db, incomingCallPath), (snapshot) => {
+      const offerData = snapshot.val() as IncomingCallOffer | null;
+      if (offerData && chatStateRef.current === 'idle') {
+        setIncomingCall(offerData);
+        setChatState('receiving_call');
+      } else if (!offerData && chatStateRef.current === 'receiving_call') {
+        // Offer was revoked or declined by caller
+        setIncomingCall(null);
+        setChatState('idle');
+      }
+    });
+    addFirebaseListener(incomingCallPath, incomingCallListener);
+    return () => removeFirebaseListener(incomingCallPath);
+  }, [currentUserProfile]);
+
+  const addFirebaseListener = (path: string, unsubscribe: Unsubscribe) => {
+    removeFirebaseListener(path); // Remove existing if any
+    firebaseListenersRef.current.push({ path, unsubscribe });
+  };
+
+  const removeFirebaseListener = (path: string) => {
+    const listenerIndex = firebaseListenersRef.current.findIndex(l => l.path === path);
+    if (listenerIndex > -1) {
+      try {
+        firebaseListenersRef.current[listenerIndex].unsubscribe();
+      } catch (error) {
+        console.warn("Error unsubscribing Firebase listener for path:", path, error);
+      }
+      firebaseListenersRef.current.splice(listenerIndex, 1);
+    }
+  };
+  
+  const cleanupAllFirebaseListeners = useCallback(() => {
+    firebaseListenersRef.current.forEach(({ unsubscribe, path }) => {
       try {
         unsubscribe();
       } catch (error) {
-        console.warn("Error unsubscribing Firebase listener:", error);
+        console.warn("Error unsubscribing Firebase listener during general cleanup:", path, error);
       }
     });
-    firebaseListenersRef.current = firebaseListenersRef.current.filter(
-        l => l.ref.toString().includes('/queue')
-    );
+    firebaseListenersRef.current = [];
   }, []);
+
 
   const cleanupWebRTC = useCallback(() => {
     if (peerConnectionRef.current) {
@@ -147,6 +210,17 @@ export default function HomePage() {
       peerConnectionRef.current.onicecandidate = null;
       peerConnectionRef.current.oniceconnectionstatechange = null;
       peerConnectionRef.current.onsignalingstatechange = null;
+      localStream?.getTracks().forEach(track => { // Stop local tracks before closing PC
+        if (peerConnectionRef.current?.getSenders) {
+          peerConnectionRef.current.getSenders().forEach(sender => {
+            if (sender.track === track) {
+              try {
+                peerConnectionRef.current?.removeTrack(sender);
+              } catch (e) { console.warn("Error removing track:", e); }
+            }
+          });
+        }
+      });
       peerConnectionRef.current.close();
       peerConnectionRef.current = null;
     }
@@ -158,89 +232,73 @@ export default function HomePage() {
   }, [localStream]);
 
   const cleanupCallData = useCallback(async () => {
-    // User specific call data cleanup
-    if (userIdRef.current) {
-      const userCallInfoRef = ref(db, `calls/${userIdRef.current}`);
-      await remove(userCallInfoRef).catch(e => console.warn("Error removing user call info:", e));
-    }
-    // Room data cleanup (caller responsibility)
-    if (roomIdRef.current && isCallerRef.current) {
-      const roomDataRef = ref(db, `rooms/${roomIdRef.current}`);
-      await remove(roomDataRef).catch(e => console.warn("Error removing room data:", e));
-    }
-  }, []); // isCallerRef, userIdRef, roomIdRef are refs
+    const currentRoomId = roomIdRef.current;
+    const currentPeerId = peerIdRef.current;
+    const currentUserId = currentUserProfile?.id;
 
+    if (currentRoomId) {
+      remove(ref(db, `callSignals/${currentRoomId}`)).catch(e => console.warn("Error removing room signals:", e));
+      remove(ref(db, `iceCandidates/${currentRoomId}`)).catch(e => console.warn("Error removing ICE candidates for room:", e));
+    }
+    if (isCallerRef.current && currentPeerId) { // Caller clears the offer they sent
+      remove(ref(db, `callSignals/${currentPeerId}/pendingOffer`)).catch(e => console.warn("Error removing pending offer by caller:", e));
+    }
+    if (!isCallerRef.current && currentUserId && peerIdRef.current) { // Callee clears their accepted offer path
+         remove(ref(db, `callSignals/${currentUserId}/pendingOffer`)).catch(e => console.warn("Error removing pending offer by callee:", e));
+    }
+  }, [currentUserProfile?.id]);
 
-  // General cleanup on unmount or when firebaseUser changes (logout)
   useEffect(() => {
     return () => {
       cleanupWebRTC();
-      cleanupFirebaseListeners(); // This now only cleans call-specific ones
-      if (userIdRef.current) { // If user was logged in and in queue
-        const queueUserRef = ref(db, `queue/${userIdRef.current}`);
-        remove(queueUserRef);
+      cleanupAllFirebaseListeners();
+      if (currentUserProfile?.id) {
+        remove(ref(db, `onlineUsers/${currentUserProfile.id}`));
       }
-      cleanupCallData();
+      cleanupCallData(); // Ensure call data is cleaned on unmount/logout
     };
-  }, [cleanupWebRTC, cleanupFirebaseListeners, cleanupCallData, firebaseUser]);
-
+  }, [cleanupWebRTC, cleanupAllFirebaseListeners, cleanupCallData, currentUserProfile?.id]);
 
   const handleEndCall = useCallback(async (showReveal = true) => {
-    console.log("handleEndCall called, showReveal:", showReveal, "Current role (isCaller):", isCallerRef.current, "Room ID:", roomIdRef.current);
+    const wasConnected = chatStateRef.current === 'connected' || chatStateRef.current === 'connecting' || chatStateRef.current === 'dialing';
     
-    const wasCaller = isCallerRef.current;
-    const endedRoomId = roomIdRef.current;
-
     cleanupWebRTC();
-    cleanupFirebaseListeners(); // Clean up call-specific listeners
-
-    // Cleanup call data from Firebase
-    if (userIdRef.current) {
-        const userCallInfoRef = ref(db, `calls/${userIdRef.current}`);
-        await remove(userCallInfoRef).catch(e => console.warn("Error removing user call info:", e));
-    }
-     if (endedRoomId && wasCaller) { 
-        const roomDataRef = ref(db, `rooms/${endedRoomId}`);
-        await remove(roomDataRef).catch(e => console.warn("Error removing room data for caller:", e));
+    
+    // Remove specific listeners related to this call (ICE, answer)
+    if (roomIdRef.current) {
+        removeFirebaseListener(`callSignals/${roomIdRef.current}/answer`);
+        removeFirebaseListener(`iceCandidates/${roomIdRef.current}/${peerIdRef.current}`);
+        removeFirebaseListener(`iceCandidates/${roomIdRef.current}/${currentUserProfile?.id}`);
     }
     
-    if (showReveal) {
+    await cleanupCallData();
+
+    if (showReveal && peerIdRef.current && wasConnected) {
+        if (!peerProfile) { // Fetch peer profile if not already fetched
+            const profileSnap = await get(child(ref(db, 'users'), peerIdRef.current));
+            if (profileSnap.exists()) setPeerProfile(profileSnap.val() as UserProfile);
+        }
         setChatState('revealed');
     } else {
         setChatState('idle');
+        setPeerProfile(null);
     }
+    
     roomIdRef.current = null;
     peerIdRef.current = null;
     isCallerRef.current = false;
+    setIncomingCall(null); // Clear any pending incoming call UI
 
-  }, [cleanupWebRTC, cleanupFirebaseListeners]);
+  }, [cleanupWebRTC, cleanupCallData, currentUserProfile?.id, peerProfile]);
 
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
-    if (!userIdRef.current) {
-        console.error("initializePeerConnection: userIdRef is not set.");
-        toast({ title: "Initialization Error", description: "User ID not available for WebRTC.", variant: "destructive" });
-        return null;
-    }
-    if (!currentLocalStream) {
-        console.error("initializePeerConnection: currentLocalStream is null.");
-        toast({ title: "Media Error", description: "Local media stream not available for WebRTC.", variant: "destructive" });
-        return null;
-    }
+    if (!currentUserProfile?.id || !currentLocalStream) return null;
 
     const pc = new RTCPeerConnection(servers);
-
-    currentLocalStream.getTracks().forEach(track => {
-      try {
-        pc.addTrack(track, currentLocalStream);
-      } catch (e) {
-        console.error("Error adding track to PeerConnection:", e, track, currentLocalStream);
-        toast({ title: "WebRTC Error", description: "Could not add media track.", variant: "destructive" });
-      }
-    });
+    currentLocalStream.getTracks().forEach(track => pc.addTrack(track, currentLocalStream));
 
     pc.ontrack = (event) => {
-      console.log("Remote track received:", event.track, event.streams);
       if (event.streams && event.streams[0]) {
         setRemoteStream(event.streams[0]);
       } else {
@@ -249,151 +307,27 @@ export default function HomePage() {
         setRemoteStream(newStream);
       }
     };
+    
+    pc.onicecandidate = (event) => {
+        if (event.candidate && roomIdRef.current && currentUserProfile?.id && peerIdRef.current) {
+            const candidatesRef = ref(db, `iceCandidates/${roomIdRef.current}/${currentUserProfile.id}`);
+            push(candidatesRef, event.candidate.toJSON());
+        }
+    };
 
     pc.oniceconnectionstatechange = () => {
-      const currentPc = peerConnectionRef.current;
-      if (!currentPc) return;
-
-      console.log(`ICE connection state: ${currentPc.iceConnectionState}`);
-      if (currentPc.iceConnectionState === 'connected') {
-        if (chatStateRef.current === 'connecting') setChatState('connected');
-      } else if (
-        currentPc.iceConnectionState === 'failed' ||
-        currentPc.iceConnectionState === 'disconnected' ||
-        currentPc.iceConnectionState === 'closed'
-      ) {
+      if (!pc) return;
+      if (pc.iceConnectionState === 'connected') {
+        if (chatStateRef.current === 'connecting' || chatStateRef.current === 'dialing') setChatState('connected');
+      } else if (['failed', 'disconnected', 'closed'].includes(pc.iceConnectionState)) {
         if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
-            toast({ title: "Connection Issue", description: `Call state: ${currentPc.iceConnectionState}. Ending call.`, variant: currentPc.iceConnectionState === 'failed' ? "destructive" : "default"});
-            handleEndCall(false);
+          toast({ title: "Connection Issue", description: `Call state: ${pc.iceConnectionState}. Ending call.`, variant: "default" });
+          handleEndCall(false);
         }
       }
-    };
-
-    pc.onsignalingstatechange = () => {
-        if(peerConnectionRef.current) {
-            console.log(`Signaling state change: ${peerConnectionRef.current.signalingState}`);
-        }
     };
     return pc;
-  }, [toast, handleEndCall]);
-
-
-  const initiateCallSequence = useCallback(async (currentRoomId: string, peerPc: RTCPeerConnection) => {
-    if (!peerPc || !userIdRef.current || !peerIdRef.current) {
-        console.error("initiateCallSequence: Missing PC, userId, or peerId.", {pc: !!peerPc, userId: userIdRef.current, peerId: peerIdRef.current});
-        return;
-    }
-    console.log(`Initiating call sequence for room ${currentRoomId} to peer ${peerIdRef.current}`);
-
-    const roomRef = ref(db, `rooms/${currentRoomId}`);
-    const offerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
-
-    peerPc.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log("Caller ICE candidate:", event.candidate);
-        push(offerCandidatesCollectionRef, event.candidate.toJSON());
-      }
-    };
-
-    try {
-        const offerDescription = await peerPc.createOffer();
-        await peerPc.setLocalDescription(offerDescription);
-        await set(ref(roomRef, 'offer'), { sdp: offerDescription.sdp, type: offerDescription.type });
-        console.log("Offer created and set for room:", currentRoomId);
-    } catch (e) {
-        console.error("Error creating or setting offer:", e);
-        toast({ title: "Call Setup Error", description: "Failed to create call offer.", variant: "destructive" });
-        handleEndCall(false);
-        return;
-    }
-
-    const answerListenerRef = ref(roomRef, 'answer');
-    const answerListener = onValue(answerListenerRef, async (snapshot) => {
-      if (snapshot.exists()) {
-        const answer = snapshot.val();
-        console.log("Received answer:", answer);
-        if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) {
-          try {
-            await peerPc.setRemoteDescription(new RTCSessionDescription(answer));
-            console.log("Remote description (answer) set by caller.");
-          } catch (e) {
-             console.error("Error setting remote description from answer (caller):", e);
-          }
-        }
-      }
-    });
-    firebaseListenersRef.current.push({ ref: answerListenerRef, unsubscribe: answerListener });
-
-    const calleeIceCandidatesListenerRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
-    const calleeIceCandidatesListener = onValue(calleeIceCandidatesListenerRef, (snapshot) => {
-      snapshot.forEach((childSnapshot) => {
-        const candidate = childSnapshot.val();
-        if (candidate && peerPc.currentRemoteDescription && peerPc.signalingState !== 'closed') {
-          console.log("Caller received callee ICE candidate:", candidate);
-          peerPc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding received ICE candidate (callee for caller):", e));
-        }
-      });
-    });
-    firebaseListenersRef.current.push({ ref: calleeIceCandidatesListenerRef, unsubscribe: calleeIceCandidatesListener });
-  }, [toast, handleEndCall]);
-
-  const answerCallSequence = useCallback(async (currentRoomId: string, peerPc: RTCPeerConnection) => {
-    if (!peerPc || !userIdRef.current || !peerIdRef.current) {
-        console.error("answerCallSequence: Missing PC, userId, or peerId.", {pc: !!peerPc, userId: userIdRef.current, peerId: peerIdRef.current});
-        return;
-    }
-    console.log(`Answering call sequence for room ${currentRoomId} from peer ${peerIdRef.current}`);
-
-    const roomRef = ref(db, `rooms/${currentRoomId}`);
-    const answerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
-
-    peerPc.onicecandidate = (event) => {
-      if (event.candidate) {
-        console.log("Callee ICE candidate:", event.candidate);
-        push(answerCandidatesCollectionRef, event.candidate.toJSON());
-      }
-    };
-
-    const offerListenerRef = ref(roomRef, 'offer');
-    const offerListener = onValue(offerListenerRef, async (snapshot) => {
-      if (snapshot.exists()) {
-        const offer = snapshot.val();
-        console.log("Received offer:", offer);
-         if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) { 
-            try {
-                await peerPc.setRemoteDescription(new RTCSessionDescription(offer));
-                console.log("Remote description (offer) set by callee.");
-                const answerDescription = await peerPc.createAnswer();
-                await peerPc.setLocalDescription(answerDescription);
-                await set(ref(roomRef, 'answer'), { sdp: answerDescription.sdp, type: answerDescription.type });
-                console.log("Answer created and set for room:", currentRoomId);
-            } catch (e) {
-                console.error("Error during answer sequence (setting offer/creating answer):", e);
-                toast({ title: "Call Setup Error", description: "Failed to process call offer.", variant: "destructive" });
-                handleEndCall(false);
-            }
-        }
-      }
-    }, (error) => {
-        console.error("Error listening to offer:", error);
-        toast({ title: "Connection Error", description: "Failed to receive call details.", variant: "destructive" });
-        handleEndCall(false);
-    });
-    firebaseListenersRef.current.push({ ref: offerListenerRef, unsubscribe: offerListener });
-
-    const callerIceCandidatesListenerRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
-    const callerIceCandidatesListener = onValue(callerIceCandidatesListenerRef, (snapshot) => {
-      snapshot.forEach((childSnapshot) => {
-        const candidate = childSnapshot.val();
-         if (candidate && peerPc.currentRemoteDescription && peerPc.signalingState !== 'closed') {
-          console.log("Callee received caller ICE candidate:", candidate);
-          peerPc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding received ICE candidate (caller for callee):", e));
-        }
-      });
-    });
-    firebaseListenersRef.current.push({ ref: callerIceCandidatesListenerRef, unsubscribe: callerIceCandidatesListener });
-  }, [toast, handleEndCall]);
-
+  }, [currentUserProfile?.id, handleEndCall, toast]);
 
   const startLocalStream = async () => {
     try {
@@ -404,169 +338,161 @@ export default function HomePage() {
       return stream;
     } catch (err) {
       console.error("Error accessing media devices.", err);
-      toast({ title: "Media Error", description: "Could not access camera/microphone. Please check permissions.", variant: "destructive" });
+      toast({ title: "Media Error", description: "Could not access camera/microphone.", variant: "destructive" });
       setChatState('idle');
       return null;
     }
   };
 
-  const handleStartChat = async () => {
-    if (!userIdRef.current || !currentUserProfile) {
-        toast({ title: "Not Logged In", description: "Please log in to start chatting.", variant: "destructive" });
-        return;
+  const initiateDirectCall = async (targetUserId: string) => {
+    if (!currentUserProfile || targetUserId === currentUserProfile.id) {
+      toast({title: "Cannot call self", variant: "destructive"});
+      return;
     }
-    console.log(`User ${userIdRef.current} starting chat initiation...`);
-
-    await handleEndCall(false); 
-    
-    roomIdRef.current = null;
-    peerIdRef.current = null;
-    isCallerRef.current = false;
+    await handleEndCall(false); // Clean up any previous call state
 
     const stream = await startLocalStream();
     if (!stream) return;
 
     const pc = initializePeerConnection(stream);
     if (!pc) {
-      toast({ title: "WebRTC Error", description: "Failed to initialize video call components.", variant: "destructive"});
+      toast({ title: "WebRTC Error", description: "Failed to initialize video call components.", variant: "destructive" });
+      cleanupWebRTC();
+      return;
+    }
+    peerConnectionRef.current = pc;
+    
+    isCallerRef.current = true;
+    peerIdRef.current = targetUserId;
+    const newRoomId = push(child(ref(db), 'rooms')).key; // Generate a unique room ID
+    if (!newRoomId) {
+        toast({title: "Error", description: "Could not create a call room.", variant: "destructive"});
+        return;
+    }
+    roomIdRef.current = newRoomId;
+    setChatState('dialing');
+
+    try {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const offerPayload: IncomingCallOffer = {
+        roomId: newRoomId,
+        offer,
+        callerId: currentUserProfile.id,
+        callerName: currentUserProfile.name,
+        callerPhotoUrl: currentUserProfile.photoUrl,
+      };
+      await set(ref(db, `callSignals/${targetUserId}/pendingOffer`), offerPayload);
+      toast({ title: "Calling...", description: `Calling ${targetUserId.substring(0,6)}...` });
+
+      // Listen for answer
+      const answerPath = `callSignals/${newRoomId}/answer`;
+      const answerListener = onValue(ref(db, answerPath), async (snapshot) => {
+        if (snapshot.exists()) {
+          const { answer: answerSdp, calleeId } = snapshot.val() as CallAnswer;
+          if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'stable') { // Or check if remoteDescription is null
+            await pc.setRemoteDescription(new RTCSessionDescription(answerSdp));
+            console.log("Remote description (answer) set by caller.");
+            remove(ref(db, answerPath)); // Clean up answer once processed
+            removeFirebaseListener(answerPath);
+          }
+        }
+      });
+      addFirebaseListener(answerPath, answerListener);
+
+      // Listen for ICE candidates from callee
+      const calleeIcePath = `iceCandidates/${newRoomId}/${targetUserId}`;
+      const calleeIceListener = onValue(ref(db, calleeIcePath), (snapshot) => {
+        snapshot.forEach((childSnapshot) => {
+          const candidate = childSnapshot.val();
+          if (candidate && pc.remoteDescription) { // Ensure remoteDescription is set before adding candidates
+            pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding callee ICE candidate:", e));
+          }
+        });
+      });
+      addFirebaseListener(calleeIcePath, calleeIceListener);
+
+    } catch (error) {
+      console.error("Error initiating call:", error);
+      toast({ title: "Call Error", description: "Could not initiate the call.", variant: "destructive" });
+      handleEndCall(false);
+    }
+  };
+
+  const handleAcceptCall = async () => {
+    if (!incomingCall || !currentUserProfile) return;
+    
+    await handleEndCall(false); // Clean up any previous call before accepting new one
+
+    const stream = await startLocalStream();
+    if (!stream) {
+      setIncomingCall(null);
       setChatState('idle');
-      await cleanupWebRTC();
+      return;
+    }
+
+    const pc = initializePeerConnection(stream);
+    if (!pc) {
+      toast({ title: "WebRTC Error", description: "Failed to initialize video call components.", variant: "destructive" });
+      setIncomingCall(null);
+      setChatState('idle');
+      cleanupWebRTC();
       return;
     }
     peerConnectionRef.current = pc;
 
-    const currentUserCallPath = `calls/${userIdRef.current}`;
-    const currentUserCallRef = ref(db, currentUserCallPath);
-    
-    // Remove any previous listener for this exact path to avoid duplicates
-    firebaseListenersRef.current = firebaseListenersRef.current.filter(l => {
-        if (l.ref.toString().endsWith(currentUserCallPath)) {
-            try { l.unsubscribe(); } catch (e) { console.warn("Error unsubscribing old call listener:", e); }
-            return false;
-        }
-        return true;
-    });
+    isCallerRef.current = false;
+    peerIdRef.current = incomingCall.callerId;
+    roomIdRef.current = incomingCall.roomId;
+    setChatState('connecting');
 
-    const callListener = onValue(currentUserCallRef, async (snapshot) => {
-      if (snapshot.exists() && snapshot.val().role === 'callee' && chatStateRef.current === 'searching') {
-        const callData = snapshot.val();
-        console.log(`User ${userIdRef.current} received call offer (acting as callee):`, callData);
-        
-        const listenerIndex = firebaseListenersRef.current.findIndex(l => l.ref.toString().endsWith(currentUserCallPath));
-        if (listenerIndex > -1) {
-            firebaseListenersRef.current[listenerIndex].unsubscribe();
-            firebaseListenersRef.current.splice(listenerIndex, 1);
-        }
-        
-        const userInQueueRef = ref(db, `queue/${userIdRef.current!}`);
-        await remove(userInQueueRef);
+    try {
+      await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
 
-        roomIdRef.current = callData.roomId;
-        peerIdRef.current = callData.peerId;
-        isCallerRef.current = false;
-        setChatState('connecting');
+      const answerPayload: CallAnswer = {
+        answer,
+        calleeId: currentUserProfile.id,
+      };
+      await set(ref(db, `callSignals/${incomingCall.roomId}/answer`), answerPayload);
+      
+      // Remove the pending offer for this user
+      await remove(ref(db, `callSignals/${currentUserProfile.id}/pendingOffer`));
+      setIncomingCall(null); // Clear incoming call UI
 
-        if (peerConnectionRef.current) {
-            answerCallSequence(callData.roomId, peerConnectionRef.current);
-        } else {
-            console.error("Callee: PeerConnection not available for answerCallSequence.");
-            toast({ title: "WebRTC Error", description: "Connection component missing.", variant: "destructive" });
-            handleEndCall(false);
-        }
-      }
-    }, (error) => {
-      console.error("Firebase onValue error for calls listener:", error);
-      toast({title: "Connection Error", description: "Failed to listen for calls.", variant: "destructive"});
+      // Listen for ICE candidates from caller
+      const callerIcePath = `iceCandidates/${incomingCall.roomId}/${incomingCall.callerId}`;
+      const callerIceListener = onValue(ref(db, callerIcePath), (snapshot) => {
+        snapshot.forEach((childSnapshot) => {
+          const candidate = childSnapshot.val();
+          if (candidate && pc.remoteDescription) { // Ensure remoteDescription is set (it is, from offer)
+             pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding caller ICE candidate:", e));
+          }
+        });
+      });
+      addFirebaseListener(callerIcePath, callerIceListener);
+
+    } catch (error) {
+      console.error("Error accepting call:", error);
+      toast({ title: "Call Error", description: "Could not accept the call.", variant: "destructive" });
       handleEndCall(false);
-    });
-    firebaseListenersRef.current.push({ ref: currentUserCallRef, unsubscribe: callListener });
-
-
-    setChatState('searching');
-    const queueDbRef = ref(db, `queue`);
-    let matchedPeerId: string | null = null;
-    let newRoomIdForCaller: string | null = null;
-
-    runTransaction(queueDbRef, (currentQueueData) => {
-      if (chatStateRef.current !== 'searching') {
-          console.log("Transaction aborted: Chat state no longer 'searching'. State:", chatStateRef.current);
-        return; 
-      }
-      currentQueueData = currentQueueData || {};
-      const availableUserIds = Object.keys(currentQueueData).filter(id => id !== userIdRef.current);
-
-      if (availableUserIds.length > 0) {
-        const peerToCall = availableUserIds.sort((a,b) => currentQueueData[a].timestamp - currentQueueData[b].timestamp)[0];
-        console.log(`Transaction: User ${userIdRef.current} found peer ${peerToCall}.`);
-        
-        matchedPeerId = peerToCall; 
-        newRoomIdForCaller = `${userIdRef.current}_${peerToCall}`;
-
-        delete currentQueueData[peerToCall]; 
-        if (currentQueueData[userIdRef.current!]) {
-             delete currentQueueData[userIdRef.current!];
-        }
-        return currentQueueData;
-      } else { 
-        console.log(`Transaction: User ${userIdRef.current} joining queue.`);
-        currentQueueData[userIdRef.current!] = { timestamp: serverTimestamp(), userId: userIdRef.current, name: currentUserProfile.name };
-        return currentQueueData;
-      }
-    }).then(async (result) => {
-      if (!result.committed) {
-        console.warn("Queue transaction not committed. State:", chatStateRef.current);
-        if(chatStateRef.current === 'searching') {
-            setChatState('idle');
-            toast({ title: "Matching Error", description: "Could not join queue. Try again.", variant: "destructive" });
-        }
-        return;
-      }
-
-      console.log("Queue transaction committed. User:", userIdRef.current, "Matched Peer:", matchedPeerId);
-
-      if (matchedPeerId && newRoomIdForCaller) { 
-        isCallerRef.current = true;
-        peerIdRef.current = matchedPeerId;
-        roomIdRef.current = newRoomIdForCaller;
-        
-        console.log(`User ${userIdRef.current} (Caller) matched with ${peerIdRef.current}. Room: ${roomIdRef.current}`);
-        setChatState('connecting');
-
-        try {
-            await set(ref(db, `calls/${peerIdRef.current}`), { roomId: roomIdRef.current, role: 'callee', peerId: userIdRef.current });
-            await set(ref(db, `calls/${userIdRef.current!}`), { roomId: roomIdRef.current, role: 'caller', peerId: peerIdRef.current });
-            console.log("Caller: Firebase call roles set.");
-
-            if (peerConnectionRef.current) {
-                initiateCallSequence(roomIdRef.current, peerConnectionRef.current);
-            } else {
-                console.error("Caller: PeerConnection not available for initiateCallSequence.");
-                toast({ title: "WebRTC Error", description: "Connection component missing.", variant: "destructive" });
-                handleEndCall(false);
-            }
-        } catch (e) {
-            console.error("Error setting up call roles or initiating call:", e);
-            toast({ title: "Call Setup Error", description: "Failed to establish call signalling.", variant: "destructive" });
-            handleEndCall(false);
-        }
-      } else { 
-        console.log(`User ${userIdRef.current} added to queue, searching.`);
-        toast({ title: "Searching...", description: "You're in the queue. Waiting for a peer." });
-      }
-    }).catch(error => {
-      console.error("Queue transaction failed:", error);
-      toast({ title: "Matching Error", description: "Error with matching queue. Try again.", variant: "destructive" });
-      setChatState('idle');
-      cleanupWebRTC();
-    });
+    }
   };
 
+  const handleDeclineCall = async () => {
+    if (!incomingCall || !currentUserProfile) return;
+    // Optionally notify caller about decline (e.g. set a 'declined' flag on the room signal)
+    await remove(ref(db, `callSignals/${currentUserProfile.id}/pendingOffer`));
+    setIncomingCall(null);
+    setChatState('idle');
+    toast({title: "Call Declined"});
+  };
 
   const handleFindNew = async () => {
-    await handleEndCall(false);
-    setTimeout(() => { 
-        if (firebaseUser) handleStartChat();
-    }, 100);
+    await handleEndCall(false); // This will reset state to 'idle'
+    setPeerProfile(null);
   };
 
   const toggleMic = () => {
@@ -595,49 +521,63 @@ export default function HomePage() {
     );
   }
 
+  if (!currentUserProfile) { // User not logged in
+    return (
+       <MainLayout>
+        <div className="text-center mb-4">
+            <h1 className="text-4xl font-bold text-primary mb-2">BlindSpot Social</h1>
+            <p className="text-lg text-foreground/80">Connect Directly. Chat Visually.</p>
+        </div>
+        <div className="flex flex-col items-center gap-6 p-8 bg-card rounded-xl shadow-lg w-full max-w-md">
+            <UserCircle className="w-24 h-24 text-primary" />
+            <h2 className="text-2xl font-semibold text-foreground">Welcome!</h2>
+            <p className="text-center text-muted-foreground max-w-sm">
+                Sign in to see who's online and start a video call.
+            </p>
+            {/* The useAuth hook provides a signInWithGoogle method, but it's not directly used here.
+                Firebase typically manages the redirect or popup for Google Sign-In.
+                If a dedicated button for signInWithGoogle from useAuth is needed, it should be added.
+                For now, assuming FirebaseUI or similar handles the sign-in flow if not already signed in.
+                The <AuthButtons /> component from previous iterations would typically handle this.
+                Let's assume the useAuth hook handles the initial auth check and provides `firebaseUser`.
+                If firebaseUser is null, the sign-in prompt (implicitly handled by Firebase or an Auth page) shows.
+            */}
+            <p className="text-sm text-muted-foreground">Please sign in to continue.</p>
+             {/* Placeholder for a sign-in button if useAuth doesn't redirect */}
+        </div>
+      </MainLayout>
+    );
+  }
+
   return (
     <MainLayout>
       <div className="text-center mb-4">
         <h1 className="text-4xl font-bold text-primary mb-2">BlindSpot Social</h1>
-        <p className="text-lg text-foreground/80">Connect Anonymously. Reveal Meaningfully.</p>
+        <p className="text-lg text-foreground/80">Connect Directly. Chat Visually.</p>
       </div>
 
-      {!firebaseUser ? (
-        <div className="flex flex-col items-center gap-6 p-8 bg-card rounded-xl shadow-lg w-full max-w-md">
-            <UserCircle className="w-16 h-16 text-accent" />
-            <h2 className="text-2xl font-semibold text-foreground">Welcome!</h2>
-            <p className="text-center text-muted-foreground max-w-sm">
-                Sign in with Google to start connecting with others anonymously.
-            </p>
-            <Button onClick={signInWithGoogle} size="lg" className="w-full max-w-xs">
-                <LogIn className="mr-2 h-5 w-5" />
-                Sign in with Google
-            </Button>
-        </div>
-      ) : chatState === 'idle' && currentUserProfile ? (
-        <div className="flex flex-col items-center gap-6 p-8 bg-card rounded-xl shadow-lg w-full max-w-md">
+      {chatState === 'idle' && currentUserProfile && (
+        <div className="flex flex-col items-center gap-6 p-8 bg-card rounded-xl shadow-lg w-full max-w-lg">
           <div className='flex flex-row justify-between w-full items-center'>
             <Button onClick={handleOpenProfileModal} variant="ghost" size="sm" className="text-sm">
-                <Edit3 className="mr-2 h-4 w-4" /> Edit Profile
+                <Edit3 className="mr-2 h-4 w-4" /> Edit Your Profile
             </Button>
             <Button onClick={signOut} variant="outline" size="sm">
                 <LogOut className="mr-2 h-4 w-4" /> Sign Out
             </Button>
           </div>
           <UserProfileCard user={currentUserProfile} />
-          <Zap className="w-12 h-12 text-accent mt-4" />
-          <h2 className="text-2xl font-semibold text-foreground">Ready for a Spark, {currentUserProfile.name}?</h2>
-          <p className="text-center text-muted-foreground max-w-sm">
-            Dive into an anonymous video chat. If you click, you might just meet someone amazing.
-          </p>
-          <Button onClick={handleStartChat} size="lg" className="w-full max-w-xs">
-            <MessageSquare className="mr-2 h-5 w-5" />
-            Start Anonymous Chat
-          </Button>
+          <div className="w-full mt-6">
+            <OnlineUsersPanel 
+                onlineUsers={onlineUsers} 
+                onInitiateCall={initiateDirectCall}
+                currentUserId={currentUserProfile.id}
+            />
+          </div>
         </div>
-      ) : null}
+      )}
 
-      {(chatState === 'searching' || chatState === 'connecting' || chatState === 'connected') && currentUserProfile && (
+      {(chatState === 'dialing' || chatState === 'connecting' || chatState === 'connected') && (
         <div className="w-full flex flex-col items-center gap-6">
           <VideoChatPlaceholder
             localStream={localStream}
@@ -649,38 +589,49 @@ export default function HomePage() {
             chatState={chatState}
           />
           <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
-            <Button onClick={() => handleEndCall(true)} size="lg" className="flex-1" disabled={chatState !== 'connected'}>
-              <Users className="mr-2 h-5 w-5" />
-              End Chat & Reveal Profiles
+            <Button onClick={() => handleEndCall(true)} size="lg" className="flex-1" variant="destructive">
+              <PhoneOff className="mr-2 h-5 w-5" />
+              End Call
             </Button>
-            <ReportDialog
-              reportedUser={null} // Matched user profile not yet available here for anonymous reporting
-              triggerButtonText="Report Anonymous User"
-              triggerButtonVariant="destructive"
-              triggerButtonFullWidth={true}
-            />
+             {chatState === 'connected' && ( // Only allow reporting once connected and peer is known
+                <ReportDialog
+                reportedUser={peerProfile} // Will be null until reveal, or fetched earlier
+                triggerButtonText="Report User"
+                triggerButtonVariant="outline"
+                triggerButtonFullWidth={true}
+                />
+            )}
           </div>
         </div>
       )}
 
       {chatState === 'revealed' && currentUserProfile && (
         <div className="w-full flex flex-col items-center gap-8">
-          <h2 className="text-3xl font-semibold text-primary">Profiles Revealed!</h2>
-          <div className="grid md:grid-cols-2 gap-8 w-full">
-            <UserProfileCard user={currentUserProfile} />
-            <UserProfileCard user={mockMatchedUser} /> {/* Matched user is still mock */}
-          </div>
+          <h2 className="text-3xl font-semibold text-primary">Call Ended</h2>
+          {peerProfile ? (
+            <>
+              <p className="text-muted-foreground">You chatted with {peerProfile.name}.</p>
+              <div className="grid md:grid-cols-2 gap-8 w-full">
+                <UserProfileCard user={currentUserProfile} />
+                <UserProfileCard user={peerProfile} />
+              </div>
+            </>
+          ) : (
+            <p className="text-muted-foreground">The other user's profile could not be loaded.</p>
+          )}
           <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md mt-4">
             <Button onClick={handleFindNew} size="lg" variant="secondary" className="flex-1">
-              <Repeat className="mr-2 h-5 w-5" />
-              Find Someone New
+              <VideoIcon className="mr-2 h-5 w-5" />
+              Back to Online Users
             </Button>
-            <ReportDialog
-              reportedUser={mockMatchedUser}
-              triggerButtonText={`Report ${mockMatchedUser.name}`}
-              triggerButtonVariant="destructive"
-              triggerButtonFullWidth={true}
-            />
+            {peerProfile && (
+                 <ReportDialog
+                 reportedUser={peerProfile}
+                 triggerButtonText={`Report ${peerProfile.name}`}
+                 triggerButtonVariant="destructive"
+                 triggerButtonFullWidth={true}
+               />
+            )}
           </div>
            <Button onClick={signOut} variant="outline" size="lg" className="mt-4">
                 <LogOut className="mr-2 h-5 w-5" /> Sign Out
@@ -688,8 +639,6 @@ export default function HomePage() {
         </div>
       )}
       
-      {firebaseUser && <QueuedUsersPanel queuedUserIds={queuedUserIds} />}
-
       {/* Profile Edit Modal */}
       <Dialog open={isProfileModalOpen} onOpenChange={setIsProfileModalOpen}>
         <DialogContent>
@@ -706,6 +655,15 @@ export default function HomePage() {
                 id="profile-name"
                 value={editableProfile.name || ''}
                 onChange={(e) => setEditableProfile(p => ({ ...p, name: e.target.value }))}
+              />
+            </div>
+             <div className="grid gap-2">
+              <Label htmlFor="profile-photo-url">Photo URL</Label>
+              <Input
+                id="profile-photo-url"
+                value={editableProfile.photoUrl || ''}
+                onChange={(e) => setEditableProfile(p => ({ ...p, photoUrl: e.target.value }))}
+                placeholder="https://example.com/your-photo.png"
               />
             </div>
             <div className="grid gap-2">
@@ -729,6 +687,32 @@ export default function HomePage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Incoming Call Dialog */}
+      <AlertDialog open={chatState === 'receiving_call' && !!incomingCall}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+                <PhoneIncoming className="text-primary h-6 w-6" />
+                Incoming Call
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              You have an incoming call from:
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex items-center gap-3 my-4 p-3 bg-muted/50 rounded-md">
+            <Avatar className="h-12 w-12">
+                <AvatarImage src={incomingCall?.callerPhotoUrl} alt={incomingCall?.callerName} />
+                <AvatarFallback>{incomingCall?.callerName?.charAt(0) || 'U'}</AvatarFallback>
+            </Avatar>
+            <span className="font-semibold text-lg">{incomingCall?.callerName || 'Unknown Caller'}</span>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={handleDeclineCall}>Decline</AlertDialogCancel>
+            <AlertDialogAction onClick={handleAcceptCall}>Accept</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
     </MainLayout>
   );

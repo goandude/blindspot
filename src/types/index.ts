@@ -11,6 +11,14 @@ export interface UserProfile {
   updatedAt?: any;
 }
 
+// Simplified user representation for online list
+export interface OnlineUser {
+  id: string;
+  name: string;
+  photoUrl: string;
+}
+
+
 export interface RTCSessionDescriptionJSON {
   sdp: string;
   type: RTCSdpType;
@@ -21,4 +29,17 @@ export interface RTCIceCandidateJSON {
   sdpMid: string | null;
   sdpMLineIndex: number | null;
   usernameFragment?: string | null;
+}
+
+export interface IncomingCallOffer {
+  roomId: string;
+  offer: RTCSessionDescriptionInit;
+  callerId: string;
+  callerName: string;
+  callerPhotoUrl: string;
+}
+
+export interface CallAnswer {
+  answer: RTCSessionDescriptionInit;
+  calleeId: string;
 }

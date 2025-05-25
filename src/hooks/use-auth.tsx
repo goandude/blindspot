@@ -3,13 +3,14 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { 
-  onAuthStateChanged, 
-  signInWithPopup, 
+  onAuthStateChanged,
   signOut as firebaseSignOut,
+  signInWithRedirect, // Or signInWithPopup
+  GoogleAuthProvider,
   type User as FirebaseUser 
 } from 'firebase/auth';
-import { ref, get, set, serverTimestamp, update } from 'firebase/database';
-import { auth, googleProvider, db } from '@/lib/firebase';
+import { ref, get, set, serverTimestamp, update, onDisconnect, goOffline, goOnline } from 'firebase/database';
+import { auth, db, googleProvider } from '@/lib/firebase';
 import type { UserProfile } from '@/types';
 import { useToast } from '@/hooks/use-toast';
 
@@ -56,7 +57,14 @@ export function useAuth() {
     const userRef = ref(db, `users/${uid}`);
     try {
       await update(userRef, {...updates, updatedAt: serverTimestamp()});
-      setAuthState(prev => prev.profile && prev.user?.uid === uid ? { ...prev, profile: { ...prev.profile, ...updates } } : prev);
+      // Update local authState.profile with the new updates
+      setAuthState(prev => {
+        if (prev.profile && prev.user?.uid === uid) {
+          const updatedProfile = { ...prev.profile, ...updates };
+          return { ...prev, profile: updatedProfile };
+        }
+        return prev;
+      });
       toast({ title: "Profile Updated", description: "Your profile has been successfully updated." });
     } catch (error) {
       console.error("Error updating profile:", error);
@@ -70,30 +78,36 @@ export function useAuth() {
       if (firebaseUser) {
         setAuthState(prev => ({ ...prev, user: firebaseUser, loading: true, error: null }));
         try {
+          goOnline(db); // Ensure Firebase connection is active
           const profile = await fetchUserProfile(firebaseUser);
-          // Update last login timestamp
           const userRef = ref(db, `users/${firebaseUser.uid}`);
           await update(userRef, { lastLogin: serverTimestamp() });
           
           setAuthState({ user: firebaseUser, profile, loading: false, error: null });
+
         } catch (err) {
           console.error("Error fetching/creating user profile:", err);
           setAuthState({ user: firebaseUser, profile: null, loading: false, error: err as Error });
           toast({ title: "Profile Error", description: "Could not load your profile.", variant: "destructive" });
         }
       } else {
+        if (authState.user) { // If there was a user, now they are signed out
+            const userStatusDatabaseRef = ref(db, `/onlineUsers/${authState.user.uid}`);
+            remove(userStatusDatabaseRef); // Attempt to remove from online list on explicit sign out
+            goOffline(db); // Disconnect from Firebase RTDB
+        }
         setAuthState({ user: null, profile: null, loading: false, error: null });
       }
     });
 
     return () => unsubscribe();
-  }, [fetchUserProfile, toast]);
+  }, [fetchUserProfile, toast, authState.user]); // Added authState.user to dependencies for cleanup logic
 
   const signInWithGoogle = async () => {
     setAuthState(prev => ({ ...prev, loading: true, error: null }));
     try {
-      await signInWithPopup(auth, googleProvider);
-      // onAuthStateChanged will handle setting user and profile
+      await signInWithRedirect(auth, googleProvider);
+      // onAuthStateChanged will handle the result
     } catch (error) {
       console.error("Google Sign-In Error:", error);
       setAuthState(prev => ({ ...prev, loading: false, error: error as Error }));
@@ -102,16 +116,49 @@ export function useAuth() {
   };
 
   const signOut = async () => {
+    const currentUserId = authState.user?.uid;
     setAuthState(prev => ({ ...prev, loading: true, error: null }));
     try {
+      if (currentUserId) {
+        // Before signing out, remove user from onlineUsers
+        const userStatusDatabaseRef = ref(db, `/onlineUsers/${currentUserId}`);
+        await remove(userStatusDatabaseRef);
+      }
       await firebaseSignOut(auth);
-      // onAuthStateChanged will handle setting user and profile to null
+      // onAuthStateChanged will set user and profile to null.
+      // It will also call goOffline(db).
     } catch (error) {
       console.error("Sign-Out Error:", error);
       setAuthState(prev => ({ ...prev, loading: false, error: error as Error }));
       toast({ title: "Sign-Out Error", description: "Could not sign out.", variant: "destructive" });
     }
   };
+
+  // Effect to handle browser close or refresh for presence
+  useEffect(() => {
+    if (!authState.user || !authState.profile) return;
+
+    const userStatusDatabaseRef = ref(db, `/onlineUsers/${authState.user.uid}`);
+    const presenceData = {
+      id: authState.user.uid,
+      name: authState.profile.name,
+      photoUrl: authState.profile.photoUrl,
+    };
+
+    const connectedRef = ref(db, '.info/connected');
+    const conStateListener = onValue(connectedRef, async (snapshot) => {
+      if (snapshot.val() === true) {
+        await set(userStatusDatabaseRef, presenceData);
+        onDisconnect(userStatusDatabaseRef).remove();
+      }
+    });
+
+    return () => {
+      conStateListener(); // Detach listener
+      // onDisconnect handles removal if connection drops, but if user signs out, explicit removal is better
+    };
+  }, [authState.user, authState.profile]);
+
 
   return { ...authState, signInWithGoogle, signOut, updateUserProfile };
 }
