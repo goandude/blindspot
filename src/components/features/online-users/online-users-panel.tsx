@@ -10,11 +10,12 @@ import { ScrollArea } from '@/components/ui/scroll-area';
 
 interface OnlineUsersPanelProps {
   onlineUsers: OnlineUser[];
-  onInitiateCall: (userId: string) => void;
+  onInitiateCall: (user: OnlineUser) => void; // Changed to pass the full OnlineUser object
   currentUserId: string | null;
 }
 
 export function OnlineUsersPanel({ onlineUsers, onInitiateCall, currentUserId }: OnlineUsersPanelProps) {
+  // Already filtered in page.tsx, but double check to be safe
   const otherOnlineUsers = onlineUsers.filter(user => user.id !== currentUserId);
 
   return (
@@ -30,12 +31,12 @@ export function OnlineUsersPanel({ onlineUsers, onInitiateCall, currentUserId }:
                 <li key={user.id} className="flex items-center justify-between p-3 bg-muted/50 rounded-lg shadow-sm">
                   <div className="flex items-center gap-3">
                     <Avatar className="h-10 w-10 border-2 border-primary">
-                      <AvatarImage src={user.photoUrl} alt={user.name} />
+                      <AvatarImage src={user.photoUrl} alt={user.name} data-ai-hint="avatar abstract"/>
                       <AvatarFallback>{user.name ? user.name.charAt(0).toUpperCase() : <User />}</AvatarFallback>
                     </Avatar>
                     <span className="font-medium text-foreground/90">{user.name}</span>
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => onInitiateCall(user.id)}>
+                  <Button size="sm" variant="outline" onClick={() => onInitiateCall(user)}>
                     <Video className="mr-2 h-4 w-4" /> Call
                   </Button>
                 </li>
@@ -44,10 +45,12 @@ export function OnlineUsersPanel({ onlineUsers, onInitiateCall, currentUserId }:
           </ScrollArea>
         ) : (
           <p className="text-sm text-muted-foreground text-center py-4">
-            No other users are currently online.
+            No other users are currently online. Try opening another tab!
           </p>
         )}
       </CardContent>
     </Card>
   );
 }
+
+    

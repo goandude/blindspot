@@ -1,17 +1,17 @@
 
-import type { UserProfile } from '@/types';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar'; // AvatarImage removed as next/image is used directly
+import type { UserProfile, OnlineUser } from '@/types'; // Added OnlineUser
+import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { User } from 'lucide-react';
-import Image from 'next/image';
+// Removed next/image as photoUrl is now simpler string
 
 interface UserProfileCardProps {
-  user: UserProfile | null; // Allow null for loading states or if no user
+  user: UserProfile | OnlineUser | null; // Allow OnlineUser as well for simpler display
+  isSessionUser?: boolean; // To distinguish the current session user card
 }
 
-export function UserProfileCard({ user }: UserProfileCardProps) {
+export function UserProfileCard({ user, isSessionUser = false }: UserProfileCardProps) {
   if (!user) {
-    // Optional: Render a skeleton or placeholder if user is null
     return (
       <Card className="w-full max-w-md shadow-lg animate-pulse">
         <CardHeader className="items-center text-center">
@@ -26,35 +26,41 @@ export function UserProfileCard({ user }: UserProfileCardProps) {
     );
   }
 
+  const photo = user.photoUrl || `https://placehold.co/96x96.png?text=${user.name?.charAt(0) || 'A'}`;
+  const bio = (user as UserProfile).bio; // Attempt to get bio if UserProfile
+
   return (
     <Card className="w-full max-w-md shadow-lg">
       <CardHeader className="items-center text-center">
         <Avatar className="w-24 h-24 mb-4 border-2 border-primary">
-          {/* Use next/image for optimized image loading */}
-          <Image 
-            src={user.photoUrl || `https://placehold.co/96x96.png?text=${user.name?.charAt(0) || 'A'}`} 
-            alt={user.name || 'User avatar'}
-            width={96} 
-            height={96} 
-            className="rounded-full object-cover" 
-            data-ai-hint={user.dataAiHint || "person"}
-            onError={(e) => { // Fallback for broken images
-              const target = e.target as HTMLImageElement;
-              target.onerror = null; // prevent infinite loop
-              target.src = `https://placehold.co/96x96.png?text=${user.name?.charAt(0) || 'A'}`;
-            }}
+          <AvatarImage 
+            src={photo} 
+            alt={user.name || 'User avatar'} 
+            data-ai-hint={(user as UserProfile).dataAiHint || "avatar abstract"}
           />
           <AvatarFallback>
             {user.name ? user.name.charAt(0).toUpperCase() : <User className="w-12 h-12 text-muted-foreground" />}
           </AvatarFallback>
         </Avatar>
         <CardTitle className="text-2xl">{user.name || "Anonymous User"}</CardTitle>
+        {isSessionUser && <CardDescription className="text-sm">Session ID: {user.id}</CardDescription>}
       </CardHeader>
-      <CardContent>
-        <CardDescription className="text-center text-foreground/80 text-base leading-relaxed whitespace-pre-wrap">
-          {user.bio || "No bio available."}
-        </CardDescription>
-      </CardContent>
+      {bio && (
+        <CardContent>
+          <CardDescription className="text-center text-foreground/80 text-base leading-relaxed whitespace-pre-wrap">
+            {bio}
+          </CardDescription>
+        </CardContent>
+      )}
+       {!bio && !isSessionUser && (
+        <CardContent>
+            <CardDescription className="text-center text-foreground/80 text-base">
+                ID: {user.id}
+            </CardDescription>
+        </CardContent>
+      )}
     </Card>
   );
 }
+
+    

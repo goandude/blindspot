@@ -13,7 +13,8 @@ interface VideoChatPlaceholderProps {
   onToggleVideo?: () => void;
   isMicOn?: boolean;
   isVideoOn?: boolean;
-  chatState: 'idle' | 'searching' | 'connecting' | 'connected' | 'revealed';
+  chatState: 'idle' | 'dialing' | 'connecting' | 'connected' | 'revealed'; // Updated chatState
+  peerName?: string; // Added to display peer name
 }
 
 export function VideoChatPlaceholder({
@@ -24,6 +25,7 @@ export function VideoChatPlaceholder({
   isMicOn = true,
   isVideoOn = true,
   chatState,
+  peerName,
 }: VideoChatPlaceholderProps) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -41,10 +43,10 @@ export function VideoChatPlaceholder({
   }, [remoteStream]);
 
   const getTitle = () => {
-    if (chatState === 'connected') return "Connected!";
-    if (chatState === 'connecting') return "Connecting...";
-    if (chatState === 'searching') return "Searching for Peer...";
-    return "Anonymous Video Call";
+    if (chatState === 'connected') return `Connected with ${peerName || 'Peer'}!`;
+    if (chatState === 'connecting') return `Connecting to ${peerName || 'Peer'}...`;
+    if (chatState === 'dialing') return `Calling ${peerName || 'Peer'}...`;
+    return "Video Call"; // Default title, should ideally not be seen in active call states
   }
 
   return (
@@ -56,10 +58,10 @@ export function VideoChatPlaceholder({
         {/* Remote Video Feed */}
         <div className="w-full h-full absolute inset-0">
           <video ref={remoteVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
-          {!remoteStream && chatState !== 'searching' && chatState !== 'idle' && (
+          {!remoteStream && (chatState === 'connecting' || chatState === 'connected') && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-primary-foreground">
               <Users className="w-16 h-16 text-primary-foreground/70 mb-2" />
-              <p className="text-lg">Waiting for peer...</p>
+              <p className="text-lg">Waiting for {peerName || 'peer'}...</p>
             </div>
           )}
         </div>
@@ -76,17 +78,17 @@ export function VideoChatPlaceholder({
           </div>
         )}
         
-        {/* Overlays for searching/connecting states */}
-        {(chatState === 'searching' || (chatState === 'connecting' && !remoteStream)) && (
+        {/* Overlays for dialing/connecting states */}
+        {(chatState === 'dialing' || (chatState === 'connecting' && !remoteStream)) && (
             <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80 z-20">
               <Zap className="w-16 h-16 text-primary mb-4 animate-pulse" />
               <p className="text-primary-foreground text-xl font-medium">
-                {chatState === 'searching' ? "Searching for a connection..." : "Establishing connection..."}
+                {chatState === 'dialing' ? `Calling ${peerName || 'user'}...` : "Establishing connection..."}
               </p>
               <p className="text-primary-foreground/80">Please wait.</p>
             </div>
         )}
-         {!localStream && chatState !== 'idle' && (
+         {!localStream && (chatState === 'dialing' || chatState === 'connecting' || chatState === 'connected') && (
              <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-primary-foreground z-20">
                <VideoOff className="w-16 h-16 text-primary-foreground/70 mb-2" />
                <p className="text-lg">Camera not active</p>
@@ -95,14 +97,15 @@ export function VideoChatPlaceholder({
 
       </CardContent>
       <CardFooter className="flex justify-center gap-3 p-4 bg-muted/50">
-        <Button variant="outline" size="icon" aria-label="Toggle Microphone" onClick={onToggleMic} disabled={!localStream || chatState === 'searching'}>
+        <Button variant="outline" size="icon" aria-label="Toggle Microphone" onClick={onToggleMic} disabled={!localStream || chatState === 'dialing' || chatState === 'connecting'}>
           {isMicOn ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
         </Button>
-        <Button variant="outline" size="icon" aria-label="Toggle Camera" onClick={onToggleVideo} disabled={!localStream || chatState === 'searching'}>
+        <Button variant="outline" size="icon" aria-label="Toggle Camera" onClick={onToggleVideo} disabled={!localStream || chatState === 'dialing' || chatState === 'connecting'}>
           {isVideoOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
         </Button>
-        {/* End call button is managed by page.tsx */}
       </CardFooter>
     </Card>
   );
 }
+
+    

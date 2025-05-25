@@ -3,24 +3,19 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
-import { UserProfileCard } from '@/components/features/profile/user-profile-card';
 import { VideoChatPlaceholder } from '@/components/features/chat/video-chat-placeholder';
 import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
-import type { UserProfile, OnlineUser, IncomingCallOffer, CallAnswer } from '@/types';
-import { Edit3, LogOut, PhoneIncoming, PhoneOff, Video as VideoIcon, UserCircle } from 'lucide-react';
+import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile } from '@/types';
+import { PhoneIncoming, PhoneOff, Video as VideoIcon } from 'lucide-react';
 import { db } from '@/lib/firebase';
-import { ref, set, onValue, off, remove, serverTimestamp, push, child, get, Unsubscribe } from 'firebase/database';
+import { ref, set, onValue, off, remove, push, child, get, Unsubscribe, onDisconnect } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
-import { useAuth } from '@/hooks/use-auth';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, DialogClose } from '@/components/ui/dialog';
-import { Label } from '@/components/ui/label';
-import { Textarea } from '@/components/ui/textarea';
-import { Input } from '@/components/ui/input';
-import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { OnlineUsersPanel } from '@/components/features/online-users/online-users-panel';
+import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
+import { Card, CardHeader, CardContent, CardTitle, CardDescription } from '@/components/ui/card';
 
 type ChatState = 'idle' | 'dialing' | 'connecting' | 'connected' | 'revealed' | 'receiving_call';
 
@@ -31,152 +26,98 @@ const servers = {
   ],
 };
 
+// Helper to generate a simple unique ID for the session
+const generateSessionId = () => Math.random().toString(36).substring(2, 10);
+
 export default function HomePage() {
-  const { user: firebaseUser, profile: currentUserProfile, loading: authLoading, signOut, updateUserProfile } = useAuth();
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionUser, setSessionUser] = useState<OnlineUser | null>(null);
   const [chatState, setChatState] = useState<ChatState>('idle');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
-  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
-  const [editableProfile, setEditableProfile] = useState<Partial<UserProfile>>({});
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [incomingCall, setIncomingCall] = useState<IncomingCallOffer | null>(null);
-  const [peerProfile, setPeerProfile] = useState<UserProfile | null>(null);
+  const [peerInfo, setPeerInfo] = useState<OnlineUser | null>(null); // Simplified from UserProfile
+  const [loading, setLoading] = useState(true);
+
 
   const { toast } = useToast();
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const roomIdRef = useRef<string | null>(null);
-  const peerIdRef = useRef<string | null>(null); // ID of the user we are calling or being called by
+  const peerIdRef = useRef<string | null>(null); 
   const isCallerRef = useRef<boolean>(false);
   const firebaseListenersRef = useRef<Array<{ path: string; unsubscribe: Unsubscribe }>>([]);
-  const chatStateRef = useRef<ChatState>(chatState); // To access current chat state in callbacks
+  const chatStateRef = useRef<ChatState>(chatState);
 
   useEffect(() => {
     chatStateRef.current = chatState;
   }, [chatState]);
-  
-  // Update editable profile when currentUserProfile changes
+
+  // Generate session ID on component mount
   useEffect(() => {
-    if (currentUserProfile) {
-      setEditableProfile({
-        name: currentUserProfile.name,
-        bio: currentUserProfile.bio,
-        photoUrl: currentUserProfile.photoUrl,
-      });
-    }
-  }, [currentUserProfile]);
-
-  const handleOpenProfileModal = () => {
-    if (currentUserProfile) {
-      setEditableProfile({
-        name: currentUserProfile.name,
-        bio: currentUserProfile.bio,
-        photoUrl: currentUserProfile.photoUrl,
-      });
-      setIsProfileModalOpen(true);
-    }
-  };
-
-  const handleSaveProfile = async () => {
-    if (!currentUserProfile || !firebaseUser) return;
-    const updates: Partial<UserProfile> = {};
-    if (editableProfile.name && editableProfile.name !== currentUserProfile.name) updates.name = editableProfile.name;
-    if (editableProfile.bio && editableProfile.bio !== currentUserProfile.bio) updates.bio = editableProfile.bio;
-    if (editableProfile.photoUrl && editableProfile.photoUrl !== currentUserProfile.photoUrl) updates.photoUrl = editableProfile.photoUrl;
-
-
-    if (Object.keys(updates).length > 0) {
-      await updateUserProfile(firebaseUser.uid, updates);
-      // If name or photoUrl changed, update online presence
-      if (updates.name || updates.photoUrl) {
-        const onlineUserRef = ref(db, `onlineUsers/${firebaseUser.uid}`);
-        const currentPresenceData = (await get(onlineUserRef)).val();
-        if (currentPresenceData) {
-          await set(onlineUserRef, {
-            ...currentPresenceData,
-            name: updates.name || currentPresenceData.name,
-            photoUrl: updates.photoUrl || currentPresenceData.photoUrl,
-          });
-        }
-      }
-    }
-    setIsProfileModalOpen(false);
-  };
+    const newSessionId = generateSessionId();
+    setSessionId(newSessionId);
+    const user: OnlineUser = {
+      id: newSessionId,
+      name: `User-${newSessionId.substring(0, 4)}`,
+      photoUrl: `https://placehold.co/96x96.png?text=${newSessionId.charAt(0).toUpperCase()}`,
+    };
+    setSessionUser(user);
+    setLoading(false);
+  }, []);
   
   // Presence system and online users listener
   useEffect(() => {
-    if (!firebaseUser || !currentUserProfile) return;
+    if (!sessionUser) return;
 
-    const currentUserId = firebaseUser.uid;
-    const userStatusRef = ref(db, `onlineUsers/${currentUserId}`);
-    const presenceData: OnlineUser = {
-      id: currentUserId,
-      name: currentUserProfile.name,
-      photoUrl: currentUserProfile.photoUrl,
-    };
-    set(userStatusRef, presenceData);
-    const onDisconnectRef = ref(db, `onlineUsers/${currentUserId}`);
-    remove(onDisconnectRef).catch(() => {}); // Clear previous onDisconnect
+    const userStatusRef = ref(db, `onlineUsers/${sessionUser.id}`);
+    
+    // Set presence and onDisconnect handler
     onValue(ref(db, '.info/connected'), (snapshot) => {
       if (snapshot.val() === true) {
-        set(userStatusRef, presenceData);
-        // Set onDisconnect to remove user
-        remove(onDisconnectRef).catch(() => {}); // ensure this is a new onDisconnect
-        set(onDisconnectRef, null, {onDisconnect: {remove: () => {}}}); // More robust onDisconnect
-        
-        // For older Firebase SDKs or specific configurations, `set(ref, null).onDisconnect().remove()` might be needed.
-        // The current way using onDisconnect.remove() is cleaner if supported.
-        // Let's try the Firebase docs recommended way if the above doesn't work robustly:
-        const onDisconnectRemove = ref(db, `onlineUsers/${currentUserId}`);
-        onValue(ref(db, '.info/connected'), (snapshot) => {
-            if (snapshot.val() === false) { return; } // not connected
-            set(onDisconnectRemove, null).catch(()=>{}); // Clear previous onDisconnect
-            set(onDisconnectRemove, presenceData).then(() => {
-                return onDisconnectRemove.onDisconnect().remove();
-            }).catch(err => console.error("Error setting onDisconnect:", err));
-        });
-
+        set(userStatusRef, sessionUser);
+        onDisconnect(userStatusRef).remove();
       }
     });
-    
 
     const onlineUsersRefPath = 'onlineUsers';
     const onlineUsersListener = onValue(ref(db, onlineUsersRefPath), (snapshot) => {
-      const users = snapshot.val();
-      const userList: OnlineUser[] = users ? Object.values(users) : [];
-      setOnlineUsers(userList);
+      const usersData = snapshot.val();
+      const userList: OnlineUser[] = usersData ? Object.values(usersData) : [];
+      setOnlineUsers(userList.filter(u => u.id !== sessionUser.id)); // Exclude self
     });
     addFirebaseListener(onlineUsersRefPath, onlineUsersListener);
 
     return () => {
-      remove(userStatusRef); // Clean up user presence on component unmount (e.g., logout)
+      // Component unmount or sessionUser changes
       removeFirebaseListener(onlineUsersRefPath);
+      remove(userStatusRef).catch(err => console.warn("Error removing user status on unmount:", err));
     };
-  }, [firebaseUser, currentUserProfile]);
+  }, [sessionUser]);
 
   // Listener for incoming calls
   useEffect(() => {
-    if (!currentUserProfile) return;
-    const incomingCallPath = `callSignals/${currentUserProfile.id}/pendingOffer`;
+    if (!sessionUser) return;
+    const incomingCallPath = `callSignals/${sessionUser.id}/pendingOffer`;
     const incomingCallListener = onValue(ref(db, incomingCallPath), (snapshot) => {
       const offerData = snapshot.val() as IncomingCallOffer | null;
       if (offerData && chatStateRef.current === 'idle') {
         setIncomingCall(offerData);
         setChatState('receiving_call');
       } else if (!offerData && chatStateRef.current === 'receiving_call') {
-        // Offer was revoked or declined by caller
         setIncomingCall(null);
         setChatState('idle');
       }
     });
     addFirebaseListener(incomingCallPath, incomingCallListener);
     return () => removeFirebaseListener(incomingCallPath);
-  }, [currentUserProfile]);
+  }, [sessionUser]);
 
   const addFirebaseListener = (path: string, unsubscribe: Unsubscribe) => {
-    removeFirebaseListener(path); // Remove existing if any
+    removeFirebaseListener(path); 
     firebaseListenersRef.current.push({ path, unsubscribe });
   };
 
@@ -210,7 +151,7 @@ export default function HomePage() {
       peerConnectionRef.current.onicecandidate = null;
       peerConnectionRef.current.oniceconnectionstatechange = null;
       peerConnectionRef.current.onsignalingstatechange = null;
-      localStream?.getTracks().forEach(track => { // Stop local tracks before closing PC
+      localStream?.getTracks().forEach(track => {
         if (peerConnectionRef.current?.getSenders) {
           peerConnectionRef.current.getSenders().forEach(sender => {
             if (sender.track === track) {
@@ -234,66 +175,64 @@ export default function HomePage() {
   const cleanupCallData = useCallback(async () => {
     const currentRoomId = roomIdRef.current;
     const currentPeerId = peerIdRef.current;
-    const currentUserId = currentUserProfile?.id;
 
     if (currentRoomId) {
       remove(ref(db, `callSignals/${currentRoomId}`)).catch(e => console.warn("Error removing room signals:", e));
       remove(ref(db, `iceCandidates/${currentRoomId}`)).catch(e => console.warn("Error removing ICE candidates for room:", e));
     }
-    if (isCallerRef.current && currentPeerId) { // Caller clears the offer they sent
+    if (isCallerRef.current && currentPeerId) {
       remove(ref(db, `callSignals/${currentPeerId}/pendingOffer`)).catch(e => console.warn("Error removing pending offer by caller:", e));
     }
-    if (!isCallerRef.current && currentUserId && peerIdRef.current) { // Callee clears their accepted offer path
-         remove(ref(db, `callSignals/${currentUserId}/pendingOffer`)).catch(e => console.warn("Error removing pending offer by callee:", e));
+    if (!isCallerRef.current && sessionUser?.id && peerIdRef.current) {
+         remove(ref(db, `callSignals/${sessionUser.id}/pendingOffer`)).catch(e => console.warn("Error removing pending offer by callee:", e));
     }
-  }, [currentUserProfile?.id]);
+  }, [sessionUser?.id]);
 
   useEffect(() => {
     return () => {
       cleanupWebRTC();
       cleanupAllFirebaseListeners();
-      if (currentUserProfile?.id) {
-        remove(ref(db, `onlineUsers/${currentUserProfile.id}`));
+      if (sessionUser?.id) {
+        remove(ref(db, `onlineUsers/${sessionUser.id}`));
       }
-      cleanupCallData(); // Ensure call data is cleaned on unmount/logout
+      cleanupCallData(); 
     };
-  }, [cleanupWebRTC, cleanupAllFirebaseListeners, cleanupCallData, currentUserProfile?.id]);
+  }, [cleanupWebRTC, cleanupAllFirebaseListeners, cleanupCallData, sessionUser?.id]);
 
   const handleEndCall = useCallback(async (showReveal = true) => {
     const wasConnected = chatStateRef.current === 'connected' || chatStateRef.current === 'connecting' || chatStateRef.current === 'dialing';
     
     cleanupWebRTC();
     
-    // Remove specific listeners related to this call (ICE, answer)
-    if (roomIdRef.current) {
+    if (roomIdRef.current && sessionUser?.id) {
         removeFirebaseListener(`callSignals/${roomIdRef.current}/answer`);
         removeFirebaseListener(`iceCandidates/${roomIdRef.current}/${peerIdRef.current}`);
-        removeFirebaseListener(`iceCandidates/${roomIdRef.current}/${currentUserProfile?.id}`);
+        removeFirebaseListener(`iceCandidates/${roomIdRef.current}/${sessionUser.id}`);
     }
     
     await cleanupCallData();
 
     if (showReveal && peerIdRef.current && wasConnected) {
-        if (!peerProfile) { // Fetch peer profile if not already fetched
-            const profileSnap = await get(child(ref(db, 'users'), peerIdRef.current));
-            if (profileSnap.exists()) setPeerProfile(profileSnap.val() as UserProfile);
-        }
+        const peer = onlineUsers.find(u => u.id === peerIdRef.current) || 
+                     (incomingCall?.callerId === peerIdRef.current ? 
+                        {id: incomingCall.callerId, name: incomingCall.callerName, photoUrl: incomingCall.callerPhotoUrl} : null);
+        setPeerInfo(peer);
         setChatState('revealed');
     } else {
         setChatState('idle');
-        setPeerProfile(null);
+        setPeerInfo(null);
     }
     
     roomIdRef.current = null;
     peerIdRef.current = null;
     isCallerRef.current = false;
-    setIncomingCall(null); // Clear any pending incoming call UI
+    setIncomingCall(null);
 
-  }, [cleanupWebRTC, cleanupCallData, currentUserProfile?.id, peerProfile]);
+  }, [cleanupWebRTC, cleanupCallData, sessionUser?.id, onlineUsers, incomingCall]);
 
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
-    if (!currentUserProfile?.id || !currentLocalStream) return null;
+    if (!sessionUser?.id || !currentLocalStream) return null;
 
     const pc = new RTCPeerConnection(servers);
     currentLocalStream.getTracks().forEach(track => pc.addTrack(track, currentLocalStream));
@@ -309,8 +248,8 @@ export default function HomePage() {
     };
     
     pc.onicecandidate = (event) => {
-        if (event.candidate && roomIdRef.current && currentUserProfile?.id && peerIdRef.current) {
-            const candidatesRef = ref(db, `iceCandidates/${roomIdRef.current}/${currentUserProfile.id}`);
+        if (event.candidate && roomIdRef.current && sessionUser?.id && peerIdRef.current) {
+            const candidatesRef = ref(db, `iceCandidates/${roomIdRef.current}/${sessionUser.id}`);
             push(candidatesRef, event.candidate.toJSON());
         }
     };
@@ -327,7 +266,7 @@ export default function HomePage() {
       }
     };
     return pc;
-  }, [currentUserProfile?.id, handleEndCall, toast]);
+  }, [sessionUser?.id, handleEndCall, toast]);
 
   const startLocalStream = async () => {
     try {
@@ -344,12 +283,12 @@ export default function HomePage() {
     }
   };
 
-  const initiateDirectCall = async (targetUserId: string) => {
-    if (!currentUserProfile || targetUserId === currentUserProfile.id) {
+  const initiateDirectCall = async (targetUser: OnlineUser) => {
+    if (!sessionUser || targetUser.id === sessionUser.id) {
       toast({title: "Cannot call self", variant: "destructive"});
       return;
     }
-    await handleEndCall(false); // Clean up any previous call state
+    await handleEndCall(false); 
 
     const stream = await startLocalStream();
     if (!stream) return;
@@ -363,8 +302,9 @@ export default function HomePage() {
     peerConnectionRef.current = pc;
     
     isCallerRef.current = true;
-    peerIdRef.current = targetUserId;
-    const newRoomId = push(child(ref(db), 'rooms')).key; // Generate a unique room ID
+    peerIdRef.current = targetUser.id;
+    setPeerInfo(targetUser); // Set peer info early for dialing state
+    const newRoomId = push(child(ref(db), 'rooms')).key; 
     if (!newRoomId) {
         toast({title: "Error", description: "Could not create a call room.", variant: "destructive"});
         return;
@@ -379,34 +319,31 @@ export default function HomePage() {
       const offerPayload: IncomingCallOffer = {
         roomId: newRoomId,
         offer,
-        callerId: currentUserProfile.id,
-        callerName: currentUserProfile.name,
-        callerPhotoUrl: currentUserProfile.photoUrl,
+        callerId: sessionUser.id,
+        callerName: sessionUser.name,
+        callerPhotoUrl: sessionUser.photoUrl || '',
       };
-      await set(ref(db, `callSignals/${targetUserId}/pendingOffer`), offerPayload);
-      toast({ title: "Calling...", description: `Calling ${targetUserId.substring(0,6)}...` });
+      await set(ref(db, `callSignals/${targetUser.id}/pendingOffer`), offerPayload);
+      toast({ title: "Calling...", description: `Calling ${targetUser.name}...` });
 
-      // Listen for answer
       const answerPath = `callSignals/${newRoomId}/answer`;
       const answerListener = onValue(ref(db, answerPath), async (snapshot) => {
         if (snapshot.exists()) {
           const { answer: answerSdp, calleeId } = snapshot.val() as CallAnswer;
-          if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'stable') { // Or check if remoteDescription is null
+          if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'stable') {
             await pc.setRemoteDescription(new RTCSessionDescription(answerSdp));
-            console.log("Remote description (answer) set by caller.");
-            remove(ref(db, answerPath)); // Clean up answer once processed
+            remove(ref(db, answerPath)); 
             removeFirebaseListener(answerPath);
           }
         }
       });
       addFirebaseListener(answerPath, answerListener);
 
-      // Listen for ICE candidates from callee
-      const calleeIcePath = `iceCandidates/${newRoomId}/${targetUserId}`;
+      const calleeIcePath = `iceCandidates/${newRoomId}/${targetUser.id}`;
       const calleeIceListener = onValue(ref(db, calleeIcePath), (snapshot) => {
         snapshot.forEach((childSnapshot) => {
           const candidate = childSnapshot.val();
-          if (candidate && pc.remoteDescription) { // Ensure remoteDescription is set before adding candidates
+          if (candidate && pc.remoteDescription) { 
             pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding callee ICE candidate:", e));
           }
         });
@@ -421,9 +358,9 @@ export default function HomePage() {
   };
 
   const handleAcceptCall = async () => {
-    if (!incomingCall || !currentUserProfile) return;
+    if (!incomingCall || !sessionUser) return;
     
-    await handleEndCall(false); // Clean up any previous call before accepting new one
+    await handleEndCall(false); 
 
     const stream = await startLocalStream();
     if (!stream) {
@@ -444,6 +381,7 @@ export default function HomePage() {
 
     isCallerRef.current = false;
     peerIdRef.current = incomingCall.callerId;
+    setPeerInfo({ id: incomingCall.callerId, name: incomingCall.callerName, photoUrl: incomingCall.callerPhotoUrl });
     roomIdRef.current = incomingCall.roomId;
     setChatState('connecting');
 
@@ -454,20 +392,18 @@ export default function HomePage() {
 
       const answerPayload: CallAnswer = {
         answer,
-        calleeId: currentUserProfile.id,
+        calleeId: sessionUser.id,
       };
       await set(ref(db, `callSignals/${incomingCall.roomId}/answer`), answerPayload);
       
-      // Remove the pending offer for this user
-      await remove(ref(db, `callSignals/${currentUserProfile.id}/pendingOffer`));
-      setIncomingCall(null); // Clear incoming call UI
+      await remove(ref(db, `callSignals/${sessionUser.id}/pendingOffer`));
+      setIncomingCall(null); 
 
-      // Listen for ICE candidates from caller
       const callerIcePath = `iceCandidates/${incomingCall.roomId}/${incomingCall.callerId}`;
       const callerIceListener = onValue(ref(db, callerIcePath), (snapshot) => {
         snapshot.forEach((childSnapshot) => {
           const candidate = childSnapshot.val();
-          if (candidate && pc.remoteDescription) { // Ensure remoteDescription is set (it is, from offer)
+          if (candidate && pc.remoteDescription) { 
              pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding caller ICE candidate:", e));
           }
         });
@@ -482,17 +418,16 @@ export default function HomePage() {
   };
 
   const handleDeclineCall = async () => {
-    if (!incomingCall || !currentUserProfile) return;
-    // Optionally notify caller about decline (e.g. set a 'declined' flag on the room signal)
-    await remove(ref(db, `callSignals/${currentUserProfile.id}/pendingOffer`));
+    if (!incomingCall || !sessionUser) return;
+    await remove(ref(db, `callSignals/${sessionUser.id}/pendingOffer`));
     setIncomingCall(null);
     setChatState('idle');
     toast({title: "Call Declined"});
   };
 
-  const handleFindNew = async () => {
-    await handleEndCall(false); // This will reset state to 'idle'
-    setPeerProfile(null);
+  const handleBackToOnlineUsers = async () => {
+    await handleEndCall(false); 
+    setPeerInfo(null);
   };
 
   const toggleMic = () => {
@@ -509,41 +444,13 @@ export default function HomePage() {
     }
   };
 
-  if (authLoading) {
+  if (loading || !sessionUser) {
     return (
       <MainLayout>
         <div className="flex flex-col items-center gap-4">
           <Skeleton className="h-12 w-12 rounded-full" />
           <Skeleton className="h-4 w-[250px]" />
-          <Skeleton className="h-4 w-[200px]" />
-        </div>
-      </MainLayout>
-    );
-  }
-
-  if (!currentUserProfile) { // User not logged in
-    return (
-       <MainLayout>
-        <div className="text-center mb-4">
-            <h1 className="text-4xl font-bold text-primary mb-2">BlindSpot Social</h1>
-            <p className="text-lg text-foreground/80">Connect Directly. Chat Visually.</p>
-        </div>
-        <div className="flex flex-col items-center gap-6 p-8 bg-card rounded-xl shadow-lg w-full max-w-md">
-            <UserCircle className="w-24 h-24 text-primary" />
-            <h2 className="text-2xl font-semibold text-foreground">Welcome!</h2>
-            <p className="text-center text-muted-foreground max-w-sm">
-                Sign in to see who's online and start a video call.
-            </p>
-            {/* The useAuth hook provides a signInWithGoogle method, but it's not directly used here.
-                Firebase typically manages the redirect or popup for Google Sign-In.
-                If a dedicated button for signInWithGoogle from useAuth is needed, it should be added.
-                For now, assuming FirebaseUI or similar handles the sign-in flow if not already signed in.
-                The <AuthButtons /> component from previous iterations would typically handle this.
-                Let's assume the useAuth hook handles the initial auth check and provides `firebaseUser`.
-                If firebaseUser is null, the sign-in prompt (implicitly handled by Firebase or an Auth page) shows.
-            */}
-            <p className="text-sm text-muted-foreground">Please sign in to continue.</p>
-             {/* Placeholder for a sign-in button if useAuth doesn't redirect */}
+          <p>Initializing session...</p>
         </div>
       </MainLayout>
     );
@@ -556,22 +463,23 @@ export default function HomePage() {
         <p className="text-lg text-foreground/80">Connect Directly. Chat Visually.</p>
       </div>
 
-      {chatState === 'idle' && currentUserProfile && (
+      {chatState === 'idle' && (
         <div className="flex flex-col items-center gap-6 p-8 bg-card rounded-xl shadow-lg w-full max-w-lg">
-          <div className='flex flex-row justify-between w-full items-center'>
-            <Button onClick={handleOpenProfileModal} variant="ghost" size="sm" className="text-sm">
-                <Edit3 className="mr-2 h-4 w-4" /> Edit Your Profile
-            </Button>
-            <Button onClick={signOut} variant="outline" size="sm">
-                <LogOut className="mr-2 h-4 w-4" /> Sign Out
-            </Button>
-          </div>
-          <UserProfileCard user={currentUserProfile} />
+           <Card className="w-full max-w-md shadow-md">
+            <CardHeader className="items-center text-center">
+                <Avatar className="w-20 h-20 mb-3 border-2 border-primary">
+                    <AvatarImage src={sessionUser.photoUrl} alt={sessionUser.name} data-ai-hint="avatar abstract" />
+                    <AvatarFallback>{sessionUser.name.charAt(0).toUpperCase()}</AvatarFallback>
+                </Avatar>
+                <CardTitle className="text-xl">{sessionUser.name}</CardTitle>
+                <CardDescription className="text-sm text-muted-foreground">Your current session ID: {sessionUser.id}</CardDescription>
+            </CardHeader>
+          </Card>
           <div className="w-full mt-6">
             <OnlineUsersPanel 
                 onlineUsers={onlineUsers} 
                 onInitiateCall={initiateDirectCall}
-                currentUserId={currentUserProfile.id}
+                currentUserId={sessionUser.id}
             />
           </div>
         </div>
@@ -587,15 +495,16 @@ export default function HomePage() {
             onToggleMic={toggleMic}
             onToggleVideo={toggleVideo}
             chatState={chatState}
+            peerName={peerInfo?.name || (chatState === 'dialing' ? 'Dialing...' : 'Connecting...')}
           />
           <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
             <Button onClick={() => handleEndCall(true)} size="lg" className="flex-1" variant="destructive">
               <PhoneOff className="mr-2 h-5 w-5" />
               End Call
             </Button>
-             {chatState === 'connected' && ( // Only allow reporting once connected and peer is known
+             {chatState === 'connected' && peerInfo && ( 
                 <ReportDialog
-                reportedUser={peerProfile} // Will be null until reveal, or fetched earlier
+                reportedUser={{id: peerInfo.id, name: peerInfo.name, photoUrl: peerInfo.photoUrl || '', bio: ''}} 
                 triggerButtonText="Report User"
                 triggerButtonVariant="outline"
                 triggerButtonFullWidth={true}
@@ -605,89 +514,43 @@ export default function HomePage() {
         </div>
       )}
 
-      {chatState === 'revealed' && currentUserProfile && (
+      {chatState === 'revealed' && (
         <div className="w-full flex flex-col items-center gap-8">
           <h2 className="text-3xl font-semibold text-primary">Call Ended</h2>
-          {peerProfile ? (
+          {peerInfo ? (
             <>
-              <p className="text-muted-foreground">You chatted with {peerProfile.name}.</p>
-              <div className="grid md:grid-cols-2 gap-8 w-full">
-                <UserProfileCard user={currentUserProfile} />
-                <UserProfileCard user={peerProfile} />
-              </div>
+              <p className="text-muted-foreground">You chatted with {peerInfo.name} (ID: {peerInfo.id}).</p>
+              <Card className="w-full max-w-sm p-6 bg-card shadow-lg rounded-xl">
+                <div className="flex flex-col items-center text-center">
+                    <Avatar className="w-24 h-24 mb-4 border-2 border-primary">
+                        <AvatarImage src={peerInfo.photoUrl} alt={peerInfo.name} data-ai-hint="avatar abstract"/>
+                        <AvatarFallback>{peerInfo.name.charAt(0).toUpperCase()}</AvatarFallback>
+                    </Avatar>
+                    <h3 className="text-2xl font-semibold">{peerInfo.name}</h3>
+                    <p className="text-sm text-muted-foreground">ID: {peerInfo.id}</p>
+                </div>
+              </Card>
             </>
           ) : (
-            <p className="text-muted-foreground">The other user's profile could not be loaded.</p>
+            <p className="text-muted-foreground">The other user's information could not be loaded.</p>
           )}
           <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md mt-4">
-            <Button onClick={handleFindNew} size="lg" variant="secondary" className="flex-1">
+            <Button onClick={handleBackToOnlineUsers} size="lg" variant="secondary" className="flex-1">
               <VideoIcon className="mr-2 h-5 w-5" />
               Back to Online Users
             </Button>
-            {peerProfile && (
+            {peerInfo && (
                  <ReportDialog
-                 reportedUser={peerProfile}
-                 triggerButtonText={`Report ${peerProfile.name}`}
+                 reportedUser={{id: peerInfo.id, name: peerInfo.name, photoUrl: peerInfo.photoUrl || '', bio: ''}} 
+                 triggerButtonText={`Report ${peerInfo.name}`}
                  triggerButtonVariant="destructive"
                  triggerButtonFullWidth={true}
                />
             )}
           </div>
-           <Button onClick={signOut} variant="outline" size="lg" className="mt-4">
-                <LogOut className="mr-2 h-5 w-5" /> Sign Out
-            </Button>
         </div>
       )}
       
-      {/* Profile Edit Modal */}
-      <Dialog open={isProfileModalOpen} onOpenChange={setIsProfileModalOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Edit Your Profile</DialogTitle>
-            <DialogDescription>
-              Make changes to your public profile information.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="grid gap-2">
-              <Label htmlFor="profile-name">Name</Label>
-              <Input
-                id="profile-name"
-                value={editableProfile.name || ''}
-                onChange={(e) => setEditableProfile(p => ({ ...p, name: e.target.value }))}
-              />
-            </div>
-             <div className="grid gap-2">
-              <Label htmlFor="profile-photo-url">Photo URL</Label>
-              <Input
-                id="profile-photo-url"
-                value={editableProfile.photoUrl || ''}
-                onChange={(e) => setEditableProfile(p => ({ ...p, photoUrl: e.target.value }))}
-                placeholder="https://example.com/your-photo.png"
-              />
-            </div>
-            <div className="grid gap-2">
-              <Label htmlFor="profile-bio">Bio</Label>
-              <Textarea
-                id="profile-bio"
-                value={editableProfile.bio || ''}
-                onChange={(e) => setEditableProfile(p => ({ ...p, bio: e.target.value }))}
-                placeholder="Tell us a bit about yourself..."
-                className="min-h-[100px]"
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <DialogClose asChild>
-              <Button type="button" variant="outline">
-                Cancel
-              </Button>
-            </DialogClose>
-            <Button onClick={handleSaveProfile}>Save Changes</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {/* Incoming Call Dialog */}
       <AlertDialog open={chatState === 'receiving_call' && !!incomingCall}>
         <AlertDialogContent>
@@ -702,7 +565,7 @@ export default function HomePage() {
           </AlertDialogHeader>
           <div className="flex items-center gap-3 my-4 p-3 bg-muted/50 rounded-md">
             <Avatar className="h-12 w-12">
-                <AvatarImage src={incomingCall?.callerPhotoUrl} alt={incomingCall?.callerName} />
+                <AvatarImage src={incomingCall?.callerPhotoUrl} alt={incomingCall?.callerName} data-ai-hint="avatar abstract"/>
                 <AvatarFallback>{incomingCall?.callerName?.charAt(0) || 'U'}</AvatarFallback>
             </Avatar>
             <span className="font-semibold text-lg">{incomingCall?.callerName || 'Unknown Caller'}</span>
@@ -717,3 +580,5 @@ export default function HomePage() {
     </MainLayout>
   );
 }
+
+    

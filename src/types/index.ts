@@ -1,21 +1,21 @@
 
 export interface UserProfile {
-  id: string; // Firebase Auth UID
+  id: string; 
   name: string;
-  email?: string; // Optional, from Google Auth
+  email?: string; 
   photoUrl: string;
   bio: string;
   dataAiHint?: string;
-  createdAt?:any; // Using 'any' for Firebase ServerValue.TIMESTAMP compatibility
+  createdAt?:any; 
   lastLogin?: any;
   updatedAt?: any;
 }
 
-// Simplified user representation for online list
+// User representation for online list and anonymous sessions
 export interface OnlineUser {
-  id: string;
+  id: string; // Session ID for anonymous users, Firebase Auth UID if auth is used
   name: string;
-  photoUrl: string;
+  photoUrl?: string; // Optional, can be a placeholder for anonymous users
 }
 
 
@@ -35,7 +35,7 @@ export interface IncomingCallOffer {
   roomId: string;
   offer: RTCSessionDescriptionInit;
   callerId: string;
-  callerName: string;
+  callerName:string;
   callerPhotoUrl: string;
 }
 
@@ -43,3 +43,5 @@ export interface CallAnswer {
   answer: RTCSessionDescriptionInit;
   calleeId: string;
 }
+
+    
