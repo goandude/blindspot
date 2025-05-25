@@ -11,13 +11,13 @@ import { MainLayout } from '@/components/layout/main-layout';
 import type { UserProfile } from '@/types';
 import { Zap, Users, MessageSquare, Repeat } from 'lucide-react';
 import { db } from '@/lib/firebase';
-import { ref, set, onValue, off, remove, runTransaction, type Unsubscribe, type DatabaseReference, push } from 'firebase/database';
+import { ref, set, onValue, off, remove, runTransaction, type Unsubscribe, type DatabaseReference, push, serverTimestamp } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 
 type ChatState = 'idle' | 'searching' | 'connecting' | 'connected' | 'revealed';
 
 const mockCurrentUser: UserProfile = {
-  id: 'user1', 
+  id: 'user1',
   name: 'Alex Miller',
   photoUrl: 'https://placehold.co/300x300.png',
   dataAiHint: 'man smiling',
@@ -25,7 +25,7 @@ const mockCurrentUser: UserProfile = {
 };
 
 const mockMatchedUser: UserProfile = {
-  id: 'user2', 
+  id: 'user2',
   name: 'Samira Jones',
   photoUrl: 'https://placehold.co/300x300.png',
   dataAiHint: 'woman laughing',
@@ -46,7 +46,7 @@ export default function HomePage() {
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [currentUserProfile, setCurrentUserProfile] = useState<UserProfile>(mockCurrentUser);
-  const [matchedUserProfile] = useState<UserProfile>(mockMatchedUser); 
+  const [matchedUserProfile] = useState<UserProfile>(mockMatchedUser);
   const [queuedUserIds, setQueuedUserIds] = useState<string[]>([]);
 
   const { toast } = useToast();
@@ -95,26 +95,23 @@ export default function HomePage() {
       const userCallInfoRef = ref(db, `calls/${userIdRef.current}`);
       await remove(userCallInfoRef).catch(e => console.warn("Error removing user call info:", e));
     }
-    if (roomIdRef.current) {
+    // Only the caller should remove the room data to simplify cleanup
+    if (roomIdRef.current && isCallerRef.current) {
       const roomDataRef = ref(db, `rooms/${roomIdRef.current}`);
-      if (isCallerRef.current || (roomIdRef.current && userIdRef.current && roomIdRef.current.startsWith(userIdRef.current))) {
-         await remove(roomDataRef).catch(e => console.warn("Error removing room data:", e));
-      }
+      await remove(roomDataRef).catch(e => console.warn("Error removing room data:", e));
     }
-  }, []);
+  }, []); // Note: isCallerRef, userIdRef, roomIdRef are refs, their .current value is used.
 
   useEffect(() => {
     const newUserId = `user_${Math.random().toString(36).substring(2, 10)}`;
     userIdRef.current = newUserId;
     setCurrentUserProfile(prev => ({ ...prev, id: newUserId }));
 
-    // Listener for the queue
     const queueOverallRef = ref(db, 'queue');
     const queueListener = onValue(queueOverallRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
         const allIdsInQueue = Object.keys(data);
-        // Filter out the current user's ID from the displayed list
         setQueuedUserIds(allIdsInQueue.filter(id => id !== userIdRef.current));
       } else {
         setQueuedUserIds([]);
@@ -122,24 +119,29 @@ export default function HomePage() {
     });
     firebaseListenersRef.current.push({ ref: queueOverallRef, unsubscribe: queueListener });
 
-
     return () => {
       cleanupWebRTC();
       cleanupFirebaseListeners();
       if (userIdRef.current) {
-        const queueRef = ref(db, `queue/${userIdRef.current}`);
-        remove(queueRef); 
+        const queueUserRef = ref(db, `queue/${userIdRef.current}`);
+        remove(queueUserRef);
       }
       cleanupCallData();
     };
   }, [cleanupWebRTC, cleanupFirebaseListeners, cleanupCallData]);
 
+
   const handleEndCall = useCallback(async (showReveal = true) => {
-    console.log("handleEndCall called, showReveal:", showReveal);
+    console.log("handleEndCall called, showReveal:", showReveal, "Current role (isCaller):", isCallerRef.current, "Room ID:", roomIdRef.current);
+
+    // Store current role and room ID before cleanup might clear them
+    const wasCaller = isCallerRef.current;
+    const endedRoomId = roomIdRef.current;
+
     cleanupWebRTC();
-    // Keep queue listener active, but remove call-specific listeners
+    
     const callSpecificListeners = firebaseListenersRef.current.filter(
-        l => !l.ref.toString().includes('/queue') // Keep the overall queue listener
+        l => !l.ref.toString().includes('/queue')
     );
     callSpecificListeners.forEach(({ unsubscribe }) => {
         try { unsubscribe(); } catch (e) { console.warn("Error unsubscribing call listener:", e); }
@@ -147,8 +149,16 @@ export default function HomePage() {
     firebaseListenersRef.current = firebaseListenersRef.current.filter(
         l => l.ref.toString().includes('/queue')
     );
-    
-    await cleanupCallData();
+
+    // Cleanup call data from Firebase
+    if (userIdRef.current) {
+        const userCallInfoRef = ref(db, `calls/${userIdRef.current}`);
+        await remove(userCallInfoRef).catch(e => console.warn("Error removing user call info:", e));
+    }
+    if (endedRoomId && wasCaller) { // Caller removes the room
+        const roomDataRef = ref(db, `rooms/${endedRoomId}`);
+        await remove(roomDataRef).catch(e => console.warn("Error removing room data for caller:", e));
+    }
     
     if (showReveal) {
         setChatState('revealed');
@@ -159,15 +169,18 @@ export default function HomePage() {
     peerIdRef.current = null;
     isCallerRef.current = false;
 
-  }, [cleanupWebRTC, cleanupFirebaseListeners, cleanupCallData]);
+  }, [cleanupWebRTC, cleanupFirebaseListeners]); // cleanupCallData removed as it's called internally now
+
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
     if (!userIdRef.current) {
         console.error("initializePeerConnection: userIdRef is not set.");
+        toast({ title: "Initialization Error", description: "User ID not available for WebRTC.", variant: "destructive" });
         return null;
     }
     if (!currentLocalStream) {
         console.error("initializePeerConnection: currentLocalStream is null.");
+        toast({ title: "Media Error", description: "Local media stream not available for WebRTC.", variant: "destructive" });
         return null;
     }
 
@@ -178,7 +191,7 @@ export default function HomePage() {
         pc.addTrack(track, currentLocalStream);
       } catch (e) {
         console.error("Error adding track to PeerConnection:", e, track, currentLocalStream);
-        toast({ title: "WebRTC Error", description: "Could not add media track to the connection.", variant: "destructive" });
+        toast({ title: "WebRTC Error", description: "Could not add media track.", variant: "destructive" });
       }
     });
 
@@ -192,25 +205,21 @@ export default function HomePage() {
         setRemoteStream(newStream);
       }
     };
-    
+
     pc.oniceconnectionstatechange = () => {
       const currentPc = peerConnectionRef.current;
       if (!currentPc) return;
 
       console.log(`ICE connection state: ${currentPc.iceConnectionState}`);
       if (currentPc.iceConnectionState === 'connected') {
-        setChatState('connected');
+        if (chatStateRef.current === 'connecting') setChatState('connected');
       } else if (
-        currentPc.iceConnectionState === 'failed' || 
-        currentPc.iceConnectionState === 'disconnected' || 
+        currentPc.iceConnectionState === 'failed' ||
+        currentPc.iceConnectionState === 'disconnected' ||
         currentPc.iceConnectionState === 'closed'
       ) {
         if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
-            toast({ title: "Connection Issue", description: `Call state: ${currentPc.iceConnectionState}.`, variant: currentPc.iceConnectionState === 'failed' ? "destructive" : "default"});
-        }
-        if (currentPc.iceConnectionState === 'failed') {
-            handleEndCall(false); 
-        } else if (currentPc.iceConnectionState === 'closed' && chatStateRef.current !== 'revealed' && chatStateRef.current !== 'idle') {
+            toast({ title: "Connection Issue", description: `Call state: ${currentPc.iceConnectionState}. Ending call.`, variant: currentPc.iceConnectionState === 'failed' ? "destructive" : "default"});
             handleEndCall(false);
         }
       }
@@ -221,237 +230,305 @@ export default function HomePage() {
             console.log(`Signaling state change: ${peerConnectionRef.current.signalingState}`);
         }
     };
-    
+
     return pc;
   }, [toast, handleEndCall]);
 
 
   const initiateCallSequence = useCallback(async (currentRoomId: string, peerPc: RTCPeerConnection) => {
-    if (!peerPc || !userIdRef.current || !peerIdRef.current) return;
+    if (!peerPc || !userIdRef.current || !peerIdRef.current) {
+        console.error("initiateCallSequence: Missing PC, userId, or peerId.", {pc: !!peerPc, userId: userIdRef.current, peerId: peerIdRef.current});
+        return;
+    }
+    console.log(`Initiating call sequence for room ${currentRoomId} to peer ${peerIdRef.current}`);
 
     const roomRef = ref(db, `rooms/${currentRoomId}`);
     const offerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
-    const answerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
 
     peerPc.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log("Caller ICE candidate:", event.candidate);
         push(offerCandidatesCollectionRef, event.candidate.toJSON());
       }
     };
 
-    const offerDescription = await peerPc.createOffer();
-    await peerPc.setLocalDescription(offerDescription);
-    await set(ref(roomRef, 'offer'), { sdp: offerDescription.sdp, type: offerDescription.type });
+    try {
+        const offerDescription = await peerPc.createOffer();
+        await peerPc.setLocalDescription(offerDescription);
+        await set(ref(roomRef, 'offer'), { sdp: offerDescription.sdp, type: offerDescription.type });
+        console.log("Offer created and set for room:", currentRoomId);
+    } catch (e) {
+        console.error("Error creating or setting offer:", e);
+        toast({ title: "Call Setup Error", description: "Failed to create call offer.", variant: "destructive" });
+        handleEndCall(false);
+        return;
+    }
 
     const answerListenerRef = ref(roomRef, 'answer');
     const answerListener = onValue(answerListenerRef, async (snapshot) => {
       if (snapshot.exists()) {
         const answer = snapshot.val();
+        console.log("Received answer:", answer);
         if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) {
           try {
             await peerPc.setRemoteDescription(new RTCSessionDescription(answer));
+            console.log("Remote description (answer) set by caller.");
           } catch (e) {
-             console.error("Error setting remote description from answer:", e);
+             console.error("Error setting remote description from answer (caller):", e);
           }
         }
       }
     });
     firebaseListenersRef.current.push({ ref: answerListenerRef, unsubscribe: answerListener });
 
-    const calleeIceCandidatesListenerRef = answerCandidatesCollectionRef;
+    const calleeIceCandidatesListenerRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
     const calleeIceCandidatesListener = onValue(calleeIceCandidatesListenerRef, (snapshot) => {
       snapshot.forEach((childSnapshot) => {
         const candidate = childSnapshot.val();
         if (candidate && peerPc.currentRemoteDescription && peerPc.signalingState !== 'closed') {
-          peerPc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding received ICE candidate (callee):", e));
+          console.log("Caller received callee ICE candidate:", candidate);
+          peerPc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding received ICE candidate (callee for caller):", e));
         }
       });
     });
     firebaseListenersRef.current.push({ ref: calleeIceCandidatesListenerRef, unsubscribe: calleeIceCandidatesListener });
-
-  }, []);
+  }, [toast, handleEndCall]);
 
   const answerCallSequence = useCallback(async (currentRoomId: string, peerPc: RTCPeerConnection) => {
-    if (!peerPc || !userIdRef.current || !peerIdRef.current) return;
+    if (!peerPc || !userIdRef.current || !peerIdRef.current) {
+        console.error("answerCallSequence: Missing PC, userId, or peerId.", {pc: !!peerPc, userId: userIdRef.current, peerId: peerIdRef.current});
+        return;
+    }
+    console.log(`Answering call sequence for room ${currentRoomId} from peer ${peerIdRef.current}`);
 
     const roomRef = ref(db, `rooms/${currentRoomId}`);
-    const offerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
     const answerCandidatesCollectionRef = ref(db, `rooms/${currentRoomId}/calleeCandidates`);
 
     peerPc.onicecandidate = (event) => {
       if (event.candidate) {
+        console.log("Callee ICE candidate:", event.candidate);
         push(answerCandidatesCollectionRef, event.candidate.toJSON());
       }
     };
-    
+
     const offerListenerRef = ref(roomRef, 'offer');
     const offerListener = onValue(offerListenerRef, async (snapshot) => {
       if (snapshot.exists()) {
         const offer = snapshot.val();
-         if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) {
+        console.log("Received offer:", offer);
+         if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) { // Check if remote description not already set
             try {
                 await peerPc.setRemoteDescription(new RTCSessionDescription(offer));
+                console.log("Remote description (offer) set by callee.");
                 const answerDescription = await peerPc.createAnswer();
                 await peerPc.setLocalDescription(answerDescription);
                 await set(ref(roomRef, 'answer'), { sdp: answerDescription.sdp, type: answerDescription.type });
+                console.log("Answer created and set for room:", currentRoomId);
             } catch (e) {
-                console.error("Error during answer sequence:", e);
+                console.error("Error during answer sequence (setting offer/creating answer):", e);
+                toast({ title: "Call Setup Error", description: "Failed to process call offer.", variant: "destructive" });
+                handleEndCall(false);
             }
         }
       }
+    }, (error) => {
+        console.error("Error listening to offer:", error);
+        toast({ title: "Connection Error", description: "Failed to receive call details.", variant: "destructive" });
+        handleEndCall(false);
     });
     firebaseListenersRef.current.push({ ref: offerListenerRef, unsubscribe: offerListener });
-    
-    const callerIceCandidatesListenerRef = offerCandidatesCollectionRef;
+
+    const callerIceCandidatesListenerRef = ref(db, `rooms/${currentRoomId}/callerCandidates`);
     const callerIceCandidatesListener = onValue(callerIceCandidatesListenerRef, (snapshot) => {
       snapshot.forEach((childSnapshot) => {
         const candidate = childSnapshot.val();
          if (candidate && peerPc.currentRemoteDescription && peerPc.signalingState !== 'closed') {
-          peerPc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding received ICE candidate (caller):", e));
+          console.log("Callee received caller ICE candidate:", candidate);
+          peerPc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error("Error adding received ICE candidate (caller for callee):", e));
         }
       });
     });
     firebaseListenersRef.current.push({ ref: callerIceCandidatesListenerRef, unsubscribe: callerIceCandidatesListener });
+  }, [toast, handleEndCall]);
 
-  }, []);
 
   const startLocalStream = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream); 
+      setLocalStream(stream);
       setIsVideoOn(true);
       setIsMicOn(true);
-      return stream; 
+      return stream;
     } catch (err) {
       console.error("Error accessing media devices.", err);
       toast({ title: "Media Error", description: "Could not access camera/microphone. Please check permissions.", variant: "destructive" });
+      setChatState('idle');
       return null;
     }
   };
-  
-  const handleStartChat = async () => {
-    if (!userIdRef.current) return;
-    
-    console.log("Starting chat initiation...");
-    await cleanupWebRTC(); 
-    
-    const callSpecificListeners = firebaseListenersRef.current.filter(
-        l => !l.ref.toString().includes('/queue')
-    );
-    callSpecificListeners.forEach(({ unsubscribe }) => {
-        try { unsubscribe(); } catch (e) { console.warn("Error unsubscribing call listener:", e); }
-    });
-    firebaseListenersRef.current = firebaseListenersRef.current.filter(
-        l => l.ref.toString().includes('/queue')
-    );
 
-    await cleanupCallData(); 
+  const handleStartChat = async () => {
+    if (!userIdRef.current) {
+        toast({ title: "Error", description: "User ID not available.", variant: "destructive" });
+        return;
+    }
+    console.log(`User ${userIdRef.current} starting chat initiation...`);
+
+    // 1. Cleanup previous state
+    await handleEndCall(false); // Ensures clean state before starting new
     
-    setChatState('searching');
+    // Reset refs for new call attempt (handleEndCall might not have set them if it wasn't a "full" call)
     roomIdRef.current = null;
     peerIdRef.current = null;
+    isCallerRef.current = false;
 
+    // 2. Start local stream & initialize PeerConnection
     const stream = await startLocalStream();
     if (!stream) {
-      setChatState('idle'); 
+      // startLocalStream handles toast and sets chatState to 'idle' on failure
       return;
     }
-    
-    const pc = initializePeerConnection(stream); 
-    if (!pc) {
-      toast({ title: "Error", description: "Failed to initialize video call components.", variant: "destructive"});
-      setChatState('idle');
-      await cleanupWebRTC(); 
-      return;
-    }
-    peerConnectionRef.current = pc; 
 
+    const pc = initializePeerConnection(stream);
+    if (!pc) {
+      toast({ title: "WebRTC Error", description: "Failed to initialize video call components. Check console.", variant: "destructive"});
+      setChatState('idle');
+      await cleanupWebRTC();
+      return;
+    }
+    peerConnectionRef.current = pc;
+
+    // 3. Set up listener for incoming calls (for this user acting as callee)
     const currentUserCallRef = ref(db, `calls/${userIdRef.current}`);
-    const callListener = onValue(currentUserCallRef, (snapshot) => {
-      if (snapshot.exists() && snapshot.val().role === 'callee' && !roomIdRef.current && chatStateRef.current === 'searching') { 
+    const callListener = onValue(currentUserCallRef, async (snapshot) => {
+      if (snapshot.exists() && snapshot.val().role === 'callee' && chatStateRef.current === 'searching') {
         const callData = snapshot.val();
+        console.log(`User ${userIdRef.current} received call offer (acting as callee):`, callData);
+        
+        // Unsubscribe this specific listener once the call is accepted/processed
         const listenerIndex = firebaseListenersRef.current.findIndex(l => l.ref.toString() === currentUserCallRef.toString());
         if (listenerIndex > -1) {
             firebaseListenersRef.current[listenerIndex].unsubscribe();
             firebaseListenersRef.current.splice(listenerIndex, 1);
         }
         
-        const userInQueueRef = ref(db, `queue/${userIdRef.current!}`);
-        remove(userInQueueRef);
+        const userInQueueRef = ref(db, `queue/${userIdRef.current!}`); // Remove self from queue
+        await remove(userInQueueRef);
 
         roomIdRef.current = callData.roomId;
         peerIdRef.current = callData.peerId;
-        isCallerRef.current = false;
+        isCallerRef.current = false; // This user is the callee
         setChatState('connecting');
-        if (peerConnectionRef.current) { 
+
+        if (peerConnectionRef.current) {
             answerCallSequence(callData.roomId, peerConnectionRef.current);
         } else {
-            console.error("PeerConnection not available for answerCallSequence");
+            console.error("Callee: PeerConnection not available for answerCallSequence.");
+            toast({ title: "WebRTC Error", description: "Connection component missing for answering call.", variant: "destructive" });
             handleEndCall(false);
         }
       }
     }, (error) => {
-      console.error("Firebase onValue error for calls:", error);
-      toast({title: "Error", description: "Connection to matching service failed.", variant: "destructive"});
+      console.error("Firebase onValue error for calls listener:", error);
+      toast({title: "Connection Error", description: "Failed to listen for incoming calls.", variant: "destructive"});
+      handleEndCall(false);
     });
     firebaseListenersRef.current.push({ ref: currentUserCallRef, unsubscribe: callListener });
 
+
+    // 4. Attempt to find a peer or join queue (Transaction)
+    setChatState('searching'); // Optimistically set to searching
     const queueDbRef = ref(db, `queue`);
+    let matchedPeerId: string | null = null;
+    let newRoomIdForCaller: string | null = null;
+
     runTransaction(queueDbRef, (currentQueueData) => {
-      if (chatStateRef.current !== 'searching' && chatStateRef.current !== 'idle') { 
-        return; 
+      if (chatStateRef.current !== 'searching') { // Abort if state changed (e.g. already connected by incoming call)
+          console.log("Transaction aborted: Chat state is no longer 'searching'. Current state:", chatStateRef.current);
+        return; // Abort transaction
       }
       if (currentQueueData === null) {
-        return { [userIdRef.current!]: { timestamp: Date.now() } };
+        currentQueueData = {};
       }
+      // Filter out current user, just in case of weird race conditions
       const availableUserIds = Object.keys(currentQueueData).filter(id => id !== userIdRef.current);
-      
-      if (availableUserIds.length > 0) {
-        const peerToCall = availableUserIds.sort((a,b) => currentQueueData[a].timestamp - currentQueueData[b].timestamp)[0]; 
-        delete currentQueueData[peerToCall];
-        if (currentQueueData[userIdRef.current!]) delete currentQueueData[userIdRef.current!];
 
+      if (availableUserIds.length > 0) { // Match found
+        const peerToCall = availableUserIds.sort((a,b) => currentQueueData[a].timestamp - currentQueueData[b].timestamp)[0];
+        console.log(`Transaction: User ${userIdRef.current} found peer ${peerToCall} in queue.`);
+        
+        matchedPeerId = peerToCall; // Store for post-transaction logic
+        newRoomIdForCaller = `${userIdRef.current}_${peerToCall}`;
+
+        delete currentQueueData[peerToCall]; // Remove matched peer from queue
+        if (currentQueueData[userIdRef.current!]) { // Remove self if accidentally added
+             delete currentQueueData[userIdRef.current!];
+        }
+        return currentQueueData; // Commit changes (empty or reduced queue)
+      } else { // No peer found, add self to queue
+        console.log(`Transaction: User ${userIdRef.current} joining queue.`);
+        currentQueueData[userIdRef.current!] = { timestamp: serverTimestamp(), status: 'waiting' };
+        return currentQueueData; // Commit changes (user added to queue)
+      }
+    }).then(async (result) => {
+      if (!result.committed) {
+        console.warn("Queue transaction was not committed. Likely aborted due to state change or contention.");
+        if(chatStateRef.current === 'searching') { // If still searching, means something else went wrong
+            setChatState('idle');
+            toast({ title: "Matching Error", description: "Could not join or find match in queue. Please try again.", variant: "destructive" });
+        }
+        return;
+      }
+
+      console.log("Queue transaction committed. Current user:", userIdRef.current, "Matched Peer:", matchedPeerId);
+
+      if (matchedPeerId && newRoomIdForCaller) { // A peer was matched by this user (this user is the caller)
         isCallerRef.current = true;
-        peerIdRef.current = peerToCall;
-        const newRoomId = `${userIdRef.current}_${peerToCall}`;
-        roomIdRef.current = newRoomId;
+        peerIdRef.current = matchedPeerId;
+        roomIdRef.current = newRoomIdForCaller;
         
-        Promise.all([
-          set(ref(db, `calls/${peerToCall}`), { roomId: newRoomId, role: 'callee', peerId: userIdRef.current }),
-          set(ref(db, `calls/${userIdRef.current!}`), { roomId: newRoomId, role: 'caller', peerId: peerToCall })
-        ]).then(() => {
-          setChatState('connecting');
-           if (peerConnectionRef.current) { 
-             initiateCallSequence(newRoomId, peerConnectionRef.current);
-           } else {
-            console.error("PeerConnection not available for initiateCallSequence");
+        console.log(`User ${userIdRef.current} (Caller) matched with ${peerIdRef.current}. Room: ${roomIdRef.current}`);
+        setChatState('connecting');
+
+        try {
+            // Set up call signalling paths
+            await set(ref(db, `calls/${peerIdRef.current}`), { roomId: roomIdRef.current, role: 'callee', peerId: userIdRef.current });
+            await set(ref(db, `calls/${userIdRef.current!}`), { roomId: roomIdRef.current, role: 'caller', peerId: peerIdRef.current });
+            console.log("Caller: Firebase call roles set.");
+
+            if (peerConnectionRef.current) {
+                initiateCallSequence(roomIdRef.current, peerConnectionRef.current);
+            } else {
+                console.error("Caller: PeerConnection not available for initiateCallSequence.");
+                toast({ title: "WebRTC Error", description: "Connection component missing for starting call.", variant: "destructive" });
+                handleEndCall(false);
+            }
+        } catch (e) {
+            console.error("Error setting up call roles or initiating call:", e);
+            toast({ title: "Call Setup Error", description: "Failed to establish call signalling.", variant: "destructive" });
             handleEndCall(false);
-           }
-        }).catch(e => {
-            console.error("Error setting up call roles:", e);
-            handleEndCall(false);
-        });
-        
-        return currentQueueData;
-      } else {
-        currentQueueData[userIdRef.current!] = { timestamp: Date.now() };
-        return currentQueueData;
+        }
+      } else { // No peer was matched, this user was added to the queue
+        console.log(`User ${userIdRef.current} added to queue, now searching.`);
+        // chatState is already 'searching'
+        toast({ title: "Searching...", description: "You've been added to the queue. Waiting for a peer." });
       }
     }).catch(error => {
-      console.error("Queue transaction error:", error);
-      toast({ title: "Matching Error", description: "Could not join the matching queue.", variant: "destructive" });
+      console.error("Queue transaction failed:", error);
+      toast({ title: "Matching Error", description: "An error occurred with the matching queue. Please try again.", variant: "destructive" });
       setChatState('idle');
-      cleanupWebRTC(); 
+      cleanupWebRTC();
     });
   };
 
+
   const handleFindNew = async () => {
-    await handleEndCall(false); 
-    setTimeout(() => {
+    await handleEndCall(false);
+    setTimeout(() => { // Short delay to ensure cleanup completes
         handleStartChat();
     }, 100);
   };
-  
+
   const toggleMic = () => {
     if (localStream) {
       localStream.getAudioTracks().forEach(track => track.enabled = !isMicOn);
@@ -489,7 +566,7 @@ export default function HomePage() {
 
       {(chatState === 'searching' || chatState === 'connecting' || chatState === 'connected') && (
         <div className="w-full flex flex-col items-center gap-6">
-          <VideoChatPlaceholder 
+          <VideoChatPlaceholder
             localStream={localStream}
             remoteStream={remoteStream}
             isMicOn={isMicOn}
@@ -503,11 +580,11 @@ export default function HomePage() {
               <Users className="mr-2 h-5 w-5" />
               End Chat & Reveal Profiles
             </Button>
-            <ReportDialog 
-              reportedUser={null} 
+            <ReportDialog
+              reportedUser={null}
               triggerButtonText="Report Anonymous User"
               triggerButtonVariant="destructive"
-              triggerButtonFullWidth={true} 
+              triggerButtonFullWidth={true}
             />
           </div>
         </div>
@@ -518,15 +595,15 @@ export default function HomePage() {
           <h2 className="text-3xl font-semibold text-primary">Profiles Revealed!</h2>
           <div className="grid md:grid-cols-2 gap-8 w-full">
             <UserProfileCard user={currentUserProfile} />
-            <UserProfileCard user={matchedUserProfile} /> 
+            <UserProfileCard user={matchedUserProfile} />
           </div>
           <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md mt-4">
             <Button onClick={handleFindNew} size="lg" variant="secondary" className="flex-1">
               <Repeat className="mr-2 h-5 w-5" />
               Find Someone New
             </Button>
-            <ReportDialog 
-              reportedUser={matchedUserProfile} 
+            <ReportDialog
+              reportedUser={matchedUserProfile}
               triggerButtonText={`Report ${matchedUserProfile.name}`}
               triggerButtonVariant="destructive"
               triggerButtonFullWidth={true}
@@ -534,9 +611,11 @@ export default function HomePage() {
           </div>
         </div>
       )}
-      
+
       <QueuedUsersPanel queuedUserIds={queuedUserIds} />
 
     </MainLayout>
   );
 }
+
+    
