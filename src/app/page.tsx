@@ -5,6 +5,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Button } from '@/components/ui/button';
 import { UserProfileCard } from '@/components/features/profile/user-profile-card';
 import { VideoChatPlaceholder } from '@/components/features/chat/video-chat-placeholder';
+import { QueuedUsersPanel } from '@/components/features/queue/queued-users-panel';
 import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
 import type { UserProfile } from '@/types';
@@ -46,6 +47,7 @@ export default function HomePage() {
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [currentUserProfile, setCurrentUserProfile] = useState<UserProfile>(mockCurrentUser);
   const [matchedUserProfile] = useState<UserProfile>(mockMatchedUser); 
+  const [queuedUserIds, setQueuedUserIds] = useState<string[]>([]);
 
   const { toast } = useToast();
 
@@ -106,6 +108,21 @@ export default function HomePage() {
     userIdRef.current = newUserId;
     setCurrentUserProfile(prev => ({ ...prev, id: newUserId }));
 
+    // Listener for the queue
+    const queueOverallRef = ref(db, 'queue');
+    const queueListener = onValue(queueOverallRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        const allIdsInQueue = Object.keys(data);
+        // Filter out the current user's ID from the displayed list
+        setQueuedUserIds(allIdsInQueue.filter(id => id !== userIdRef.current));
+      } else {
+        setQueuedUserIds([]);
+      }
+    });
+    firebaseListenersRef.current.push({ ref: queueOverallRef, unsubscribe: queueListener });
+
+
     return () => {
       cleanupWebRTC();
       cleanupFirebaseListeners();
@@ -120,7 +137,17 @@ export default function HomePage() {
   const handleEndCall = useCallback(async (showReveal = true) => {
     console.log("handleEndCall called, showReveal:", showReveal);
     cleanupWebRTC();
-    cleanupFirebaseListeners(); 
+    // Keep queue listener active, but remove call-specific listeners
+    const callSpecificListeners = firebaseListenersRef.current.filter(
+        l => !l.ref.toString().includes('/queue') // Keep the overall queue listener
+    );
+    callSpecificListeners.forEach(({ unsubscribe }) => {
+        try { unsubscribe(); } catch (e) { console.warn("Error unsubscribing call listener:", e); }
+    });
+    firebaseListenersRef.current = firebaseListenersRef.current.filter(
+        l => l.ref.toString().includes('/queue')
+    );
+    
     await cleanupCallData();
     
     if (showReveal) {
@@ -132,7 +159,7 @@ export default function HomePage() {
     peerIdRef.current = null;
     isCallerRef.current = false;
 
-  }, [cleanupWebRTC, cleanupFirebaseListeners, cleanupCallData]); // Added async/await to cleanupCallData
+  }, [cleanupWebRTC, cleanupFirebaseListeners, cleanupCallData]);
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
     if (!userIdRef.current) {
@@ -167,7 +194,7 @@ export default function HomePage() {
     };
     
     pc.oniceconnectionstatechange = () => {
-      const currentPc = peerConnectionRef.current; // Use the ref to get the most current PC
+      const currentPc = peerConnectionRef.current;
       if (!currentPc) return;
 
       console.log(`ICE connection state: ${currentPc.iceConnectionState}`);
@@ -184,14 +211,13 @@ export default function HomePage() {
         if (currentPc.iceConnectionState === 'failed') {
             handleEndCall(false); 
         } else if (currentPc.iceConnectionState === 'closed' && chatStateRef.current !== 'revealed' && chatStateRef.current !== 'idle') {
-            // If closed and we didn't actively end it, consider it ended.
             handleEndCall(false);
         }
       }
     };
 
     pc.onsignalingstatechange = () => {
-        if(peerConnectionRef.current) { // Check ref
+        if(peerConnectionRef.current) {
             console.log(`Signaling state change: ${peerConnectionRef.current.signalingState}`);
         }
     };
@@ -217,7 +243,8 @@ export default function HomePage() {
     await peerPc.setLocalDescription(offerDescription);
     await set(ref(roomRef, 'offer'), { sdp: offerDescription.sdp, type: offerDescription.type });
 
-    const answerListener = onValue(ref(roomRef, 'answer'), async (snapshot) => {
+    const answerListenerRef = ref(roomRef, 'answer');
+    const answerListener = onValue(answerListenerRef, async (snapshot) => {
       if (snapshot.exists()) {
         const answer = snapshot.val();
         if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) {
@@ -229,9 +256,10 @@ export default function HomePage() {
         }
       }
     });
-    firebaseListenersRef.current.push({ ref: ref(roomRef, 'answer'), unsubscribe: answerListener });
+    firebaseListenersRef.current.push({ ref: answerListenerRef, unsubscribe: answerListener });
 
-    const calleeIceCandidatesListener = onValue(answerCandidatesCollectionRef, (snapshot) => {
+    const calleeIceCandidatesListenerRef = answerCandidatesCollectionRef;
+    const calleeIceCandidatesListener = onValue(calleeIceCandidatesListenerRef, (snapshot) => {
       snapshot.forEach((childSnapshot) => {
         const candidate = childSnapshot.val();
         if (candidate && peerPc.currentRemoteDescription && peerPc.signalingState !== 'closed') {
@@ -239,7 +267,7 @@ export default function HomePage() {
         }
       });
     });
-    firebaseListenersRef.current.push({ ref: answerCandidatesCollectionRef, unsubscribe: calleeIceCandidatesListener });
+    firebaseListenersRef.current.push({ ref: calleeIceCandidatesListenerRef, unsubscribe: calleeIceCandidatesListener });
 
   }, []);
 
@@ -256,7 +284,8 @@ export default function HomePage() {
       }
     };
     
-    const offerListener = onValue(ref(roomRef, 'offer'), async (snapshot) => {
+    const offerListenerRef = ref(roomRef, 'offer');
+    const offerListener = onValue(offerListenerRef, async (snapshot) => {
       if (snapshot.exists()) {
         const offer = snapshot.val();
          if (peerPc.signalingState !== 'stable' && !peerPc.currentRemoteDescription) {
@@ -271,9 +300,10 @@ export default function HomePage() {
         }
       }
     });
-    firebaseListenersRef.current.push({ ref: ref(roomRef, 'offer'), unsubscribe: offerListener });
-
-    const callerIceCandidatesListener = onValue(offerCandidatesCollectionRef, (snapshot) => {
+    firebaseListenersRef.current.push({ ref: offerListenerRef, unsubscribe: offerListener });
+    
+    const callerIceCandidatesListenerRef = offerCandidatesCollectionRef;
+    const callerIceCandidatesListener = onValue(callerIceCandidatesListenerRef, (snapshot) => {
       snapshot.forEach((childSnapshot) => {
         const candidate = childSnapshot.val();
          if (candidate && peerPc.currentRemoteDescription && peerPc.signalingState !== 'closed') {
@@ -281,17 +311,17 @@ export default function HomePage() {
         }
       });
     });
-    firebaseListenersRef.current.push({ ref: offerCandidatesCollectionRef, unsubscribe: callerIceCandidatesListener });
+    firebaseListenersRef.current.push({ ref: callerIceCandidatesListenerRef, unsubscribe: callerIceCandidatesListener });
 
   }, []);
 
   const startLocalStream = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream); // For UI and cleanup
+      setLocalStream(stream); 
       setIsVideoOn(true);
       setIsMicOn(true);
-      return stream; // Return for immediate use
+      return stream; 
     } catch (err) {
       console.error("Error accessing media devices.", err);
       toast({ title: "Media Error", description: "Could not access camera/microphone. Please check permissions.", variant: "destructive" });
@@ -303,9 +333,19 @@ export default function HomePage() {
     if (!userIdRef.current) return;
     
     console.log("Starting chat initiation...");
-    await cleanupWebRTC(); // ensure await
-    cleanupFirebaseListeners(); // this is sync
-    await cleanupCallData(); // ensure await
+    await cleanupWebRTC(); 
+    
+    const callSpecificListeners = firebaseListenersRef.current.filter(
+        l => !l.ref.toString().includes('/queue')
+    );
+    callSpecificListeners.forEach(({ unsubscribe }) => {
+        try { unsubscribe(); } catch (e) { console.warn("Error unsubscribing call listener:", e); }
+    });
+    firebaseListenersRef.current = firebaseListenersRef.current.filter(
+        l => l.ref.toString().includes('/queue')
+    );
+
+    await cleanupCallData(); 
     
     setChatState('searching');
     roomIdRef.current = null;
@@ -313,19 +353,18 @@ export default function HomePage() {
 
     const stream = await startLocalStream();
     if (!stream) {
-      setChatState('idle'); // Reset state if stream fails
+      setChatState('idle'); 
       return;
     }
     
-    // Initialize PeerConnection with the obtained stream
     const pc = initializePeerConnection(stream); 
     if (!pc) {
       toast({ title: "Error", description: "Failed to initialize video call components.", variant: "destructive"});
       setChatState('idle');
-      await cleanupWebRTC(); // Cleanup if PC init fails early
+      await cleanupWebRTC(); 
       return;
     }
-    peerConnectionRef.current = pc; // Set the ref after successful initialization
+    peerConnectionRef.current = pc; 
 
     const currentUserCallRef = ref(db, `calls/${userIdRef.current}`);
     const callListener = onValue(currentUserCallRef, (snapshot) => {
@@ -344,7 +383,7 @@ export default function HomePage() {
         peerIdRef.current = callData.peerId;
         isCallerRef.current = false;
         setChatState('connecting');
-        if (peerConnectionRef.current) { // Check if pc is still valid
+        if (peerConnectionRef.current) { 
             answerCallSequence(callData.roomId, peerConnectionRef.current);
         } else {
             console.error("PeerConnection not available for answerCallSequence");
@@ -359,8 +398,8 @@ export default function HomePage() {
 
     const queueDbRef = ref(db, `queue`);
     runTransaction(queueDbRef, (currentQueueData) => {
-      if (chatStateRef.current !== 'searching' && chatStateRef.current !== 'idle') { // Avoid race if already connecting/connected
-        return; // Abort transaction
+      if (chatStateRef.current !== 'searching' && chatStateRef.current !== 'idle') { 
+        return; 
       }
       if (currentQueueData === null) {
         return { [userIdRef.current!]: { timestamp: Date.now() } };
@@ -382,7 +421,7 @@ export default function HomePage() {
           set(ref(db, `calls/${userIdRef.current!}`), { roomId: newRoomId, role: 'caller', peerId: peerToCall })
         ]).then(() => {
           setChatState('connecting');
-           if (peerConnectionRef.current) { // Check if pc is still valid
+           if (peerConnectionRef.current) { 
              initiateCallSequence(newRoomId, peerConnectionRef.current);
            } else {
             console.error("PeerConnection not available for initiateCallSequence");
@@ -402,7 +441,7 @@ export default function HomePage() {
       console.error("Queue transaction error:", error);
       toast({ title: "Matching Error", description: "Could not join the matching queue.", variant: "destructive" });
       setChatState('idle');
-      cleanupWebRTC(); // ensure await if it becomes async
+      cleanupWebRTC(); 
     });
   };
 
@@ -435,7 +474,7 @@ export default function HomePage() {
       </div>
 
       {chatState === 'idle' && (
-        <div className="flex flex-col items-center gap-6 p-8 bg-card rounded-xl shadow-lg w-full">
+        <div className="flex flex-col items-center gap-6 p-8 bg-card rounded-xl shadow-lg w-full max-w-md">
           <Zap className="w-16 h-16 text-accent" />
           <h2 className="text-2xl font-semibold text-foreground">Ready for a Spark?</h2>
           <p className="text-center text-muted-foreground max-w-sm">
@@ -495,8 +534,9 @@ export default function HomePage() {
           </div>
         </div>
       )}
+      
+      <QueuedUsersPanel queuedUserIds={queuedUserIds} />
+
     </MainLayout>
   );
 }
-
-      
