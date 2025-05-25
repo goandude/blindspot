@@ -9,13 +9,15 @@ import { MainLayout } from '@/components/layout/main-layout';
 import type { OnlineUser, IncomingCallOffer, CallAnswer } from '@/types';
 import { PhoneOff, Video as VideoIcon } from 'lucide-react';
 import { db } from '@/lib/firebase';
-import { ref, set, onValue, off, remove, push, child, Unsubscribe, onDisconnect } from 'firebase/database';
+import { ref, set, onValue, off, remove, push, child, Unsubscribe, onDisconnect, serverTimestamp } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { OnlineUsersPanel } from '@/components/features/online-users/online-users-panel';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { Card, CardHeader, CardContent, CardTitle, CardDescription } from '@/components/ui/card';
-import { DebugLogPanel } from '@/components/features/debug/debug-log-panel'; // New import
+import { DebugLogPanel } from '@/components/features/debug/debug-log-panel';
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
+
 
 type ChatState = 'idle' | 'dialing' | 'connecting' | 'connected' | 'revealed';
 
@@ -39,23 +41,45 @@ export default function HomePage() {
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [peerInfo, setPeerInfo] = useState<OnlineUser | null>(null);
   const [loading, setLoading] = useState(true);
-  const [debugLogs, setDebugLogs] = useState<string[]>([]); // New state for debug logs
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
 
   const { toast } = useToast();
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const roomIdRef = useRef<string | null>(null);
-  const peerIdRef = useRef<string | null>(null); // ID of the user we are in a call with
+  const peerIdRef = useRef<string | null>(null);
   const isCallerRef = useRef<boolean>(false);
-  const firebaseListeners = useRef<Map<string, { unsubscribe: Unsubscribe, path: string }>>(new Map());
+  
+  const firebaseListeners = useRef<Map<string, { unsubscribe: () => void, path: string }>>(new Map());
+  
   const chatStateRef = useRef<ChatState>(chatState);
+  const sessionIdRef = useRef<string | null>(null);
+  const sessionUserIdRef = useRef<string | null>(null);
+
+
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
+
+  useEffect(() => {
+    sessionUserIdRef.current = sessionUser?.id || null;
+  }, [sessionUser?.id]);
 
   const addDebugLog = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
-    const logEntry = `[${timestamp}] ${sessionUser?.id ? `[${sessionUser.id.substring(0,4)}] ` : '[N/A] '}${message}`;
+    const currentSId = sessionIdRef.current; // Read from ref
+    const currentUserId = sessionUserIdRef.current; // Read from ref
+    
+    let prefix = '[N/A] ';
+    if (currentUserId) {
+      prefix = `[${currentUserId.substring(0,4)}] `;
+    } else if (currentSId) {
+      prefix = `[${currentSId.substring(0,4)}] `;
+    }
+    
+    const logEntry = `[${timestamp}] ${prefix}${message}`;
     setDebugLogs(prevLogs => [...prevLogs, logEntry].slice(-100)); // Keep last 100 logs
-  }, [sessionUser?.id]);
-
+  }, []); // Empty dependency array makes addDebugLog stable
 
   useEffect(() => {
     chatStateRef.current = chatState;
@@ -63,13 +87,14 @@ export default function HomePage() {
   }, [chatState, addDebugLog]);
 
   useEffect(() => {
+    // Runs only once on mount
     const newSessionId = generateSessionId();
     setSessionId(newSessionId);
-    addDebugLog(`Generated new session ID: ${newSessionId}`);
-  }, [addDebugLog]); // addDebugLog added to dependencies
+  }, []);
 
   useEffect(() => {
     if (sessionId) {
+      addDebugLog(`Generated new session ID: ${sessionId}`);
       const user: OnlineUser = {
         id: sessionId,
         name: `User-${sessionId.substring(0, 4)}`,
@@ -81,45 +106,50 @@ export default function HomePage() {
     }
   }, [sessionId, addDebugLog]);
 
- const addFirebaseListener = useCallback((path: string, listenerFunc: any, eventType: string = 'value') => {
+
+ const addFirebaseListener = useCallback((path: string, listenerFunc: (snapshot: any) => void, eventType: string = 'value') => {
     if (firebaseListeners.current.has(path)) {
-        addDebugLog(`Listener for path ${path} already exists. Removing old one.`);
+        addDebugLog(`Listener for path ${path} already exists. Removing old one first.`);
         removeFirebaseListener(path);
     }
     const dbRef = ref(db, path);
-    onValue(dbRef, listenerFunc, (error) => {
+    const internalCallback = (snapshot: any) => {
+        listenerFunc(snapshot);
+    };
+    onValue(dbRef, internalCallback, (error) => {
         addDebugLog(`ERROR reading from ${path}: ${error.message}`);
         toast({ title: "Firebase Error", description: `Failed to listen to ${path}. Check console.`, variant: "destructive" });
     });
-    const unsubscribe = () => off(dbRef, eventType as any, listenerFunc); // Casting eventType for Firebase off function
+    // Store the function that will actually perform the unsubscribe
+    const unsubscribe = () => off(dbRef, eventType as any, internalCallback);
     firebaseListeners.current.set(path, { unsubscribe, path });
-    addDebugLog(`Added Firebase listener for path: ${path}`);
-}, [addDebugLog, toast]); // addDebugLog added
+    addDebugLog(`Added Firebase listener for path: ${path} with eventType: ${eventType}`);
+  }, [addDebugLog, toast]); // toast is stable, addDebugLog is now stable
 
-const removeFirebaseListener = useCallback((path: string) => {
+  const removeFirebaseListener = useCallback((path: string) => {
     const listenerEntry = firebaseListeners.current.get(path);
     if (listenerEntry) {
         try {
-            listenerEntry.unsubscribe();
+            listenerEntry.unsubscribe(); // Call the stored unsubscribe function
             addDebugLog(`Successfully removed Firebase listener for path: ${path}`);
-        } catch (error) {
-            addDebugLog(`WARN: Error unsubscribing Firebase listener for path ${path}: ${error}`);
+        } catch (error: any) {
+            addDebugLog(`WARN: Error unsubscribing Firebase listener for path ${path}: ${error.message || error}`);
         }
         firebaseListeners.current.delete(path);
     } else {
         addDebugLog(`WARN: No listener found for path ${path} to remove.`);
     }
-}, [addDebugLog]);
+  }, [addDebugLog]);
 
 
   const cleanupAllFirebaseListeners = useCallback(() => {
     addDebugLog(`Cleaning up ALL (${firebaseListeners.current.size}) Firebase listeners.`);
-    firebaseListeners.current.forEach((listenerEntry) => {
+    firebaseListeners.current.forEach((listenerEntry, path) => {
       try {
         listenerEntry.unsubscribe();
         addDebugLog(`Cleaned up listener for ${listenerEntry.path}`);
-      } catch (error) {
-        addDebugLog(`WARN: Error unsubscribing Firebase listener during general cleanup for path: ${listenerEntry.path} - ${error}`);
+      } catch (error: any) {
+        addDebugLog(`WARN: Error unsubscribing Firebase listener during general cleanup for path: ${listenerEntry.path} - ${error.message || error}`);
       }
     });
     firebaseListeners.current.clear();
@@ -133,18 +163,15 @@ const removeFirebaseListener = useCallback((path: string) => {
       peerConnectionRef.current.oniceconnectionstatechange = null;
       peerConnectionRef.current.onsignalingstatechange = null;
       
-      // Stop senders and remove tracks
       peerConnectionRef.current.getSenders().forEach(sender => {
         if (sender.track) {
           sender.track.stop();
         }
-        // Try removing the sender if the track was successfully stopped or if there's no track
-        // This check avoids errors if the track is already null or removed.
         if (peerConnectionRef.current && peerConnectionRef.current.signalingState !== 'closed') {
             try {
                 peerConnectionRef.current.removeTrack(sender);
-            } catch(e) {
-                addDebugLog(`WARN: Error removing track from sender: ${e}`);
+            } catch(e: any) {
+                addDebugLog(`WARN: Error removing track from sender: ${e.message || e}`);
             }
         }
       });
@@ -161,7 +188,7 @@ const removeFirebaseListener = useCallback((path: string) => {
       setLocalStream(null);
       addDebugLog(`Local stream stopped.`);
     }
-    setRemoteStream(null); // Clear remote stream
+    setRemoteStream(null);
   }, [localStream, addDebugLog]);
 
 
@@ -172,20 +199,16 @@ const removeFirebaseListener = useCallback((path: string) => {
     addDebugLog(`Cleaning up call data. MyID: ${myId}, Room: ${currentRoomId}, Peer: ${currentPeerId}`);
 
     if (currentRoomId) {
-        remove(ref(db, `callSignals/${currentRoomId}/answer`)).catch(e => addDebugLog(`WARN: Error removing room answer: ${e}`));
-        remove(ref(db, `callSignals/${currentRoomId}/offer`)).catch(e => addDebugLog(`WARN: Error removing room offer: ${e}`)); // Also clear offer for the room
+        remove(ref(db, `callSignals/${currentRoomId}`)).catch(e => addDebugLog(`WARN: Error removing room signals for ${currentRoomId}: ${e}`));
         if (myId) remove(ref(db, `iceCandidates/${currentRoomId}/${myId}`)).catch(e => addDebugLog(`WARN: Error removing my ICE for room: ${e}`));
         if (currentPeerId) remove(ref(db, `iceCandidates/${currentRoomId}/${currentPeerId}`)).catch(e => addDebugLog(`WARN: Error removing peer ICE for room: ${e}`));
     }
     
     if (myId) {
-      // Remove any pending offer directed TO me.
       remove(ref(db, `callSignals/${myId}/pendingOffer`)).catch(e => addDebugLog(`WARN: Error removing my pending offer: ${e}`));
     }
 
     if (isCallerRef.current && currentPeerId) {
-        // If I was the caller, ensure the offer I sent to the peer is removed if the call didn't establish or was aborted.
-        // The callee should remove this upon processing, but this is a fallback.
         remove(ref(db, `callSignals/${currentPeerId}/pendingOffer`)).catch(e => addDebugLog(`WARN: Caller: Error removing pending offer for peer ${currentPeerId}: ${e}`));
     }
      addDebugLog("Call data cleanup attempt finished.");
@@ -197,20 +220,18 @@ const handleEndCall = useCallback(async (showReveal = true) => {
     addDebugLog(`Handling end call. Show reveal: ${showReveal}. Current chat state: ${chatStateRef.current}`);
     const wasConnected = ['connected', 'connecting', 'dialing'].includes(chatStateRef.current);
     
-    cleanupWebRTC(); // Stop streams, close peer connection
+    cleanupWebRTC(); 
     
-    // Specific listener cleanup related to the call
     if (roomIdRef.current) {
         removeFirebaseListener(`callSignals/${roomIdRef.current}/answer`);
-        removeFirebaseListener(`callSignals/${roomIdRef.current}/offer`); // Also offer if we created a room-specific offer
+        removeFirebaseListener(`callSignals/${roomIdRef.current}/offer`);
         if (peerIdRef.current) removeFirebaseListener(`iceCandidates/${roomIdRef.current}/${peerIdRef.current}`);
         if (sessionUser?.id) removeFirebaseListener(`iceCandidates/${roomIdRef.current}/${sessionUser.id}`);
     }
-    // Remove listener for pending offers TO ME, if it exists and wasn't cleaned by successful call setup
     if (sessionUser?.id) removeFirebaseListener(`callSignals/${sessionUser.id}/pendingOffer`);
 
 
-    await cleanupCallData(); // Remove call-related data from Firebase
+    await cleanupCallData(); 
 
     if (showReveal && peerIdRef.current && wasConnected) {
         const peer = onlineUsers.find(u => u.id === peerIdRef.current) || 
@@ -225,50 +246,48 @@ const handleEndCall = useCallback(async (showReveal = true) => {
     }
     
     roomIdRef.current = null;
-    // peerIdRef.current = null; // Keep for 'revealed', clear in handleBackToOnlineUsers
+    // peerIdRef.current = null; // Keep for 'revealed' state if needed, cleared on back to online users
     isCallerRef.current = false;
 
   }, [cleanupWebRTC, cleanupCallData, sessionUser?.id, onlineUsers, peerInfo, removeFirebaseListener, addDebugLog]);
 
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
-    if (!sessionUser?.id || !currentLocalStream) {
-        addDebugLog(`ERROR: InitializePeerConnection: Missing sessionUser ID or local stream.`);
+    const currentSessionId = sessionUser?.id;
+    if (!currentSessionId || !currentLocalStream) {
+        addDebugLog(`ERROR: InitializePeerConnection: Missing sessionUser ID (${currentSessionId}) or local stream.`);
         return null;
     }
     addDebugLog(`Initializing RTCPeerConnection.`);
     const pc = new RTCPeerConnection(servers);
 
-    // Add tracks from local stream
     currentLocalStream.getTracks().forEach(track => {
         try {
             pc.addTrack(track, currentLocalStream);
             addDebugLog(`Added local track: ${track.kind}`);
-        } catch (e) {
-            addDebugLog(`ERROR adding local track ${track.kind}: ${e}`);
+        } catch (e: any) {
+            addDebugLog(`ERROR adding local track ${track.kind}: ${e.message || e}`);
         }
     });
 
     pc.ontrack = (event) => {
       addDebugLog(`Remote track received: Kind: ${event.track.kind}, ID: ${event.track.id}`);
       if (event.streams && event.streams[0]) {
-        addDebugLog(`Attaching remote stream ${event.streams[0].id} directly.`);
         setRemoteStream(event.streams[0]);
       } else {
-        // Fallback if event.streams[0] is not available (e.g. older browsers or specific scenarios)
         const newStream = new MediaStream();
         newStream.addTrack(event.track);
-        addDebugLog(`Created new remote stream ${newStream.id} and added track ${event.track.id}.`);
         setRemoteStream(newStream);
       }
     };
     
     pc.onicecandidate = (event) => {
-        if (event.candidate && roomIdRef.current && sessionUser?.id) {
+        if (event.candidate && roomIdRef.current && currentSessionId) {
             addDebugLog(`Generated ICE candidate: ${event.candidate.candidate.substring(0,30)}... for room ${roomIdRef.current}`);
-            const candidatesRef = ref(db, `iceCandidates/${roomIdRef.current}/${sessionUser.id}`);
-            push(candidatesRef, event.candidate.toJSON())
-                .catch(e => addDebugLog(`ERROR pushing ICE candidate: ${e}`));
+            const candidatesRefPath = `iceCandidates/${roomIdRef.current}/${currentSessionId}`;
+            // Check if listener exists before pushing, ensure it's set up for the other party.
+            push(ref(db, candidatesRefPath), event.candidate.toJSON())
+                .catch(e => addDebugLog(`ERROR pushing ICE candidate to ${candidatesRefPath}: ${e}`));
         } else if (!event.candidate) {
             addDebugLog("ICE gathering complete.");
         }
@@ -280,13 +299,12 @@ const handleEndCall = useCallback(async (showReveal = true) => {
       if (pc.iceConnectionState === 'connected') {
         if (['connecting', 'dialing'].includes(chatStateRef.current)) {
             setChatState('connected');
-            addDebugLog("ICE connected. Chat state set to 'connected'.");
         }
       } else if (['failed', 'disconnected', 'closed'].includes(pc.iceConnectionState)) {
         if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
           addDebugLog(`ICE state: ${pc.iceConnectionState}. Ending call.`);
           toast({ title: "Connection Issue", description: `Call state: ${pc.iceConnectionState}. Ending call.`, variant: "default" });
-          handleEndCall(false); // Don't show reveal if connection failed
+          handleEndCall(false); 
         }
       }
     };
@@ -306,10 +324,10 @@ const handleEndCall = useCallback(async (showReveal = true) => {
       setIsMicOn(true);
       addDebugLog(`Local stream started successfully. Stream ID: ${stream.id}`);
       return stream;
-    } catch (err) {
-      addDebugLog(`ERROR accessing media devices: ${err}`);
+    } catch (err: any) {
+      addDebugLog(`ERROR accessing media devices: ${err.message || err}`);
       toast({ title: "Media Error", description: "Could not access camera/microphone. Please check permissions.", variant: "destructive" });
-      setChatState('idle'); // Ensure state reset if media fails
+      setChatState('idle'); 
       return null;
     }
   }, [toast, addDebugLog]);
@@ -335,16 +353,15 @@ const handleEndCall = useCallback(async (showReveal = true) => {
     if (!pc) {
       addDebugLog("ERROR: Failed to initialize peer connection for outgoing call.");
       toast({ title: "WebRTC Error", description: "Failed to initialize video call components.", variant: "destructive" });
-      cleanupWebRTC(); // Ensure stream is stopped if pc init fails
+      cleanupWebRTC(); 
       return;
     }
     peerConnectionRef.current = pc;
     
     isCallerRef.current = true;
-    peerIdRef.current = targetUser.id; // Set peerId for the user being called
-    setPeerInfo(targetUser); // Set peer info for UI display
+    peerIdRef.current = targetUser.id;
+    setPeerInfo(targetUser); 
     
-    // Create a unique room ID for this call. Both users will use this.
     const newRoomId = push(child(ref(db), 'callRooms')).key; 
     if (!newRoomId) {
         addDebugLog("ERROR: Could not create a call room ID.");
@@ -359,66 +376,62 @@ const handleEndCall = useCallback(async (showReveal = true) => {
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      addDebugLog(`Offer created and local description set. Offer SDP: ${offer.sdp?.substring(0,50)}...`);
+      addDebugLog(`Offer created and local description set for room ${newRoomId}.`);
 
       const offerPayload: IncomingCallOffer = {
-        roomId: newRoomId, // Caller creates the room and includes it in the offer
-        offer: pc.localDescription!.toJSON(), // Send the full local description
+        roomId: newRoomId, 
+        offer: pc.localDescription!.toJSON(),
         callerId: sessionUser.id,
         callerName: sessionUser.name,
         callerPhotoUrl: sessionUser.photoUrl || '',
       };
-      const offerPath = `callSignals/${targetUser.id}/pendingOffer`; // Offer sent to targetUser's specific path
+      const offerPath = `callSignals/${targetUser.id}/pendingOffer`;
       await set(ref(db, offerPath), offerPayload);
       toast({ title: "Calling...", description: `Calling ${targetUser.name}...` });
       addDebugLog(`Offer sent to ${targetUser.id} at ${offerPath}. Room: ${newRoomId}`);
 
-      // Listen for the answer in the specific room
       const answerPath = `callSignals/${newRoomId}/answer`;
       const answerListenerCallback = async (snapshot: any) => {
-        if (snapshot.exists()) {
+        if (snapshot.exists() && peerConnectionRef.current) { // Check pc still exists
           const answerData = snapshot.val() as CallAnswer;
-          addDebugLog(`Received answer from ${answerData.calleeId} for room ${newRoomId}. SDP: ${answerData.answer.sdp?.substring(0,50)}...`);
-          if (pc.signalingState === 'have-local-offer' || pc.signalingState === 'stable') {
-            if (pc.remoteDescription) {
-                addDebugLog(`WARN: Remote description already set before processing this answer. Current signaling state: ${pc.signalingState}`);
+          addDebugLog(`Received answer from ${answerData.calleeId} for room ${newRoomId}.`);
+          if (peerConnectionRef.current.signalingState === 'have-local-offer' || peerConnectionRef.current.signalingState === 'stable') { // Ensure not already processing
+            if (peerConnectionRef.current.remoteDescription) {
+                addDebugLog(`WARN: Caller: Remote description already set before processing this answer. Current signaling state: ${peerConnectionRef.current.signalingState}`);
             }
             try {
-                await pc.setRemoteDescription(new RTCSessionDescription(answerData.answer));
-                addDebugLog(`Remote description (answer) set successfully.`);
-            } catch (e) {
-                addDebugLog(`ERROR setting remote description from answer: ${e}`);
+                await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answerData.answer));
+                addDebugLog(`Caller: Remote description (answer) set successfully.`);
+            } catch (e: any) {
+                addDebugLog(`ERROR: Caller: setting remote description from answer: ${e.message || e}`);
                 handleEndCall(false);
                 return;
             }
             removeFirebaseListener(answerPath); 
             remove(ref(db, answerPath)).catch(e => addDebugLog(`WARN: Error removing answer from DB: ${e}`));
           } else {
-            addDebugLog(`WARN: Received answer but PC signaling state is ${pc.signalingState}. Current remote desc: ${pc.remoteDescription}`);
+            addDebugLog(`WARN: Caller: Received answer but PC signaling state is ${peerConnectionRef.current.signalingState}. Remote desc: ${peerConnectionRef.current.remoteDescription}`);
           }
         }
       };
       addFirebaseListener(answerPath, answerListenerCallback);
 
 
-      // Listen for ICE candidates from the callee in the specific room
       const calleeIcePath = `iceCandidates/${newRoomId}/${targetUser.id}`;
-      const calleeIceCallback = (snapshot: any) => {
-        snapshot.forEach((childSnapshot: any) => {
-          const candidate = childSnapshot.val();
-          if (candidate && pc.remoteDescription) { 
+      const calleeIceCallback = (snapshot: any) => { // This should be child_added
+          const candidate = snapshot.val();
+          if (candidate && peerConnectionRef.current && peerConnectionRef.current.remoteDescription) { 
             addDebugLog(`Caller: Adding ICE candidate from callee ${targetUser.id}: ${candidate.candidate?.substring(0,30)}...`);
-            pc.addIceCandidate(new RTCIceCandidate(candidate))
+            peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate))
                 .catch(e => addDebugLog(`ERROR: Caller adding callee ICE candidate: ${e}`));
-          } else if (candidate && !pc.remoteDescription) {
-            addDebugLog(`WARN: Caller received callee ICE candidate but remote description not yet set.`);
+          } else if (candidate && peerConnectionRef.current && !peerConnectionRef.current.remoteDescription) {
+            addDebugLog(`WARN: Caller received callee ICE for room ${newRoomId} but remote description not yet set.`);
           }
-        });
       };
-      addFirebaseListener(calleeIcePath, calleeIceCallback);
+      addFirebaseListener(calleeIcePath, calleeIceCallback, 'child_added');
 
-    } catch (error) {
-      addDebugLog(`ERROR initiating call: ${error}`);
+    } catch (error: any) {
+      addDebugLog(`ERROR initiating call: ${error.message || error}`);
       toast({ title: "Call Error", description: "Could not initiate the call.", variant: "destructive" });
       await handleEndCall(false);
     }
@@ -428,14 +441,16 @@ const handleEndCall = useCallback(async (showReveal = true) => {
   const processIncomingOfferAndAnswer = useCallback(async (offerData: IncomingCallOffer) => {
     if (!sessionUser || chatStateRef.current !== 'idle') {
       addDebugLog(`processIncomingOfferAndAnswer called but state is ${chatStateRef.current} or no sessionUser. Offer from ${offerData.callerId}.`);
-      if (sessionUser?.id) remove(ref(db, `callSignals/${sessionUser.id}/pendingOffer`)); // Clean up stale offer
+      if (sessionUser?.id) {
+         remove(ref(db, `callSignals/${sessionUser.id}/pendingOffer`)).catch(e => addDebugLog(`WARN: Callee: Error removing (likely stale) pending offer: ${e}`));
+      }
       return;
     }
-    addDebugLog(`Processing incoming offer from ${offerData.callerName} (${offerData.callerId}). Room: ${offerData.roomId}. Offer SDP: ${offerData.offer.sdp?.substring(0,50)}...`);
+    addDebugLog(`Processing incoming offer from ${offerData.callerName} (${offerData.callerId}). Room: ${offerData.roomId}.`);
 
     setChatState('connecting');
     peerIdRef.current = offerData.callerId;
-    roomIdRef.current = offerData.roomId; // Callee gets room ID from offer
+    roomIdRef.current = offerData.roomId;
     isCallerRef.current = false;
     
     const peer = onlineUsers.find(u => u.id === offerData.callerId) || 
@@ -446,10 +461,9 @@ const handleEndCall = useCallback(async (showReveal = true) => {
     const stream = await startLocalStream();
     if (!stream) {
       addDebugLog("Callee: Failed to start local stream for incoming call.");
-      await handleEndCall(false); // Pass false to avoid reveal state
+      await handleEndCall(false);
       return;
     }
-    addDebugLog(`Callee: Local stream started.`);
 
     const pc = initializePeerConnection(stream);
     if (!pc) {
@@ -459,149 +473,151 @@ const handleEndCall = useCallback(async (showReveal = true) => {
       return;
     }
     peerConnectionRef.current = pc;
-    addDebugLog(`Callee: Peer connection initialized.`);
 
     try {
       await pc.setRemoteDescription(new RTCSessionDescription(offerData.offer));
-      addDebugLog(`Callee: Remote description (offer) set successfully.`);
+      addDebugLog(`Callee: Remote description (offer from ${offerData.callerId}) set successfully for room ${offerData.roomId}.`);
 
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      addDebugLog(`Callee: Local description (answer) created and set. Answer SDP: ${answer.sdp?.substring(0,50)}...`);
+      addDebugLog(`Callee: Local description (answer) created and set for room ${offerData.roomId}.`);
 
       const answerPayload: CallAnswer = {
         answer: pc.localDescription!.toJSON(),
         calleeId: sessionUser.id,
       };
-      const answerPath = `callSignals/${offerData.roomId}/answer`; // Answer sent to the room-specific path
+      const answerPath = `callSignals/${offerData.roomId}/answer`;
       await set(ref(db, answerPath), answerPayload);
       addDebugLog(`Callee: Answer sent to room ${offerData.roomId} via ${answerPath}.`);
       
       const myOfferPath = `callSignals/${sessionUser.id}/pendingOffer`;
-      await remove(ref(db, myOfferPath)); // Remove the processed pending offer for this user
+      await remove(ref(db, myOfferPath)); 
       addDebugLog(`Callee: Removed processed pending offer from ${myOfferPath}.`);
 
-      // Listen for ICE candidates from the caller in the specific room
       const callerIcePath = `iceCandidates/${offerData.roomId}/${offerData.callerId}`;
-      const callerIceCallback = (snapshot: any) => {
-        snapshot.forEach((childSnapshot: any) => {
-          const candidate = childSnapshot.val();
-          if (candidate && pc.remoteDescription) { 
-             addDebugLog(`Callee: Adding ICE candidate from caller ${offerData.callerId}: ${candidate.candidate?.substring(0,30)}...`);
-             pc.addIceCandidate(new RTCIceCandidate(candidate))
+      const callerIceCallback = (snapshot: any) => { // This should be child_added
+          const candidate = snapshot.val();
+          if (candidate && peerConnectionRef.current && peerConnectionRef.current.remoteDescription) { 
+             addDebugLog(`Callee: Adding ICE candidate from caller ${offerData.callerId} for room ${offerData.roomId}: ${candidate.candidate?.substring(0,30)}...`);
+             peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate))
                 .catch(e => addDebugLog(`ERROR: Callee adding caller ICE candidate: ${e}`));
-          } else if (candidate && !pc.remoteDescription) {
-            addDebugLog(`WARN: Callee received caller ICE candidate but remote description not yet set.`);
+          } else if (candidate && peerConnectionRef.current && !peerConnectionRef.current.remoteDescription) {
+            addDebugLog(`WARN: Callee received caller ICE for room ${offerData.roomId} but remote description not yet set.`);
           }
-        });
       };
-      addFirebaseListener(callerIcePath, callerIceCallback);
-      addDebugLog(`Callee: Listening for ICE candidates from caller at ${callerIcePath}.`);
+      addFirebaseListener(callerIcePath, callerIceCallback, 'child_added');
 
-    } catch (error) {
-      addDebugLog(`Callee: ERROR processing incoming offer: ${error}`);
+    } catch (error: any) {
+      addDebugLog(`Callee: ERROR processing incoming offer for room ${offerData.roomId}: ${error.message || error}`);
       toast({ title: "Call Error", description: "Could not connect the call.", variant: "destructive" });
       await handleEndCall(false);
     }
   }, [sessionUser, initializePeerConnection, handleEndCall, onlineUsers, toast, addFirebaseListener, startLocalStream, addDebugLog]);
 
-  // Presence system and online users listener
+  // Presence system
   useEffect(() => {
-    if (!sessionUser) return;
-    addDebugLog(`Setting up presence system for ${sessionUser.id}.`);
+    if (!sessionUser?.id) return;
+    const myId = sessionUser.id;
+    addDebugLog(`Setting up presence system for ${myId}.`);
 
-    const userStatusRef = ref(db, `onlineUsers/${sessionUser.id}`);
-    const connectedRef = ref(db, '.info/connected');
+    const userStatusRef = ref(db, `onlineUsers/${myId}`);
+    const connectedRefPath = '.info/connected';
 
     const presenceConnectionCallback = (snapshot: any) => {
       if (snapshot.val() === true) {
-        addDebugLog(`Connected to Firebase. Setting presence for ${sessionUser.id}.`);
-        set(userStatusRef, sessionUser); // Set user online
-        onDisconnect(userStatusRef).remove(); // Set up removal on disconnect
+        addDebugLog(`Firebase connection established. Setting presence for ${myId}.`);
+        set(userStatusRef, sessionUser).catch(e => addDebugLog(`ERROR setting presence for ${myId}: ${e}`));
+        onDisconnect(userStatusRef).remove().catch(e => addDebugLog(`ERROR setting onDisconnect for ${myId}: ${e}`));
       } else {
-        addDebugLog(`Disconnected from Firebase.`);
-        // No need to explicitly set offline here, onDisconnect handles it.
+        addDebugLog(`Firebase connection lost for ${myId}.`);
       }
     };
-    addFirebaseListener('.info/connected', presenceConnectionCallback);
+    addFirebaseListener(connectedRefPath, presenceConnectionCallback);
 
     const onlineUsersRefPath = 'onlineUsers';
     const onlineUsersListenerCallback = (snapshot: any) => {
       const usersData = snapshot.val();
       const userList: OnlineUser[] = usersData ? Object.values(usersData) : [];
-      setOnlineUsers(userList.filter(u => u.id !== sessionUser.id)); 
-      addDebugLog(`Online users updated: ${userList.filter(u => u.id !== sessionUser.id).length} other users.`);
+      setOnlineUsers(userList.filter(u => u.id !== myId)); 
+      addDebugLog(`Online users updated: ${userList.filter(u => u.id !== myId).length} other users.`);
     };
     addFirebaseListener(onlineUsersRefPath, onlineUsersListenerCallback);
 
     return () => {
-      addDebugLog(`Cleaning up presence for session user effect: ${sessionUser?.id}`);
-      removeFirebaseListener('.info/connected');
+      addDebugLog(`Cleaning up presence for session user effect: ${myId}`);
+      removeFirebaseListener(connectedRefPath);
       removeFirebaseListener(onlineUsersRefPath);
-      // Deliberately not removing userStatusRef here on component unmount for this specific effect,
-      // as onDisconnect() should handle it. Window close/refresh is handled by onDisconnect.
-      // Explicit removal happens on sign-out or full cleanup.
+      // onDisconnect should handle removal, but as a fallback, you could explicitly remove here if needed.
+      // remove(userStatusRef).catch(e => addDebugLog(`WARN: Error removing user on presence cleanup: ${e}`));
     };
   }, [sessionUser, addFirebaseListener, removeFirebaseListener, addDebugLog]);
 
 
-  // Listener for incoming calls (now auto-accepted)
+  // Listener for incoming calls (auto-accepted)
   useEffect(() => {
-    if (!sessionUser?.id) {
-      return;
-    }
-    const incomingCallPath = `callSignals/${sessionUser.id}/pendingOffer`;
+    if (!sessionUser?.id) return;
     
+    const myId = sessionUser.id;
+    const incomingCallPath = `callSignals/${myId}/pendingOffer`;
     addDebugLog(`Attempting to attach incoming call listener at ${incomingCallPath}`);
     
     const incomingCallListenerCallback = async (snapshot: any) => {
       const offerData = snapshot.val() as IncomingCallOffer | null;
       addDebugLog(`Offer listener at ${incomingCallPath} triggered. Data exists: ${!!offerData}. Current chat state: ${chatStateRef.current}`);
 
-      if (offerData && chatStateRef.current === 'idle') {
-        addDebugLog(`Valid offer received from ${offerData.callerName}. Processing...`);
-        await processIncomingOfferAndAnswer(offerData);
-      } else if (offerData && chatStateRef.current !== 'idle') {
-        addDebugLog(`WARN: Received offer from ${offerData.callerId} while in state ${chatStateRef.current}. Removing stale offer.`);
-        remove(ref(db, incomingCallPath)).catch(e => addDebugLog(`WARN: Error removing stale offer: ${e}`));
-      } else if (!offerData) {
-          addDebugLog(`Offer listener at ${incomingCallPath} received null data (offer likely removed, declined, or processed).`);
+      if (offerData) {
+        if (chatStateRef.current === 'idle') {
+          addDebugLog(`Valid offer received from ${offerData.callerName} (room ${offerData.roomId}). Processing...`);
+          await processIncomingOfferAndAnswer(offerData);
+        } else {
+          addDebugLog(`WARN: Received offer from ${offerData.callerId} (room ${offerData.roomId}) while in state ${chatStateRef.current}. Removing stale offer.`);
+          remove(ref(db, incomingCallPath)).catch(e => addDebugLog(`WARN: Error removing stale offer: ${e}`));
+        }
+      } else {
+          addDebugLog(`Offer listener at ${incomingCallPath} received null data (offer likely removed/processed).`);
       }
     };
     
     addFirebaseListener(incomingCallPath, incomingCallListenerCallback);
-    addDebugLog(`Successfully attached incoming call listener at ${incomingCallPath}`);
 
     return () => {
         addDebugLog(`Cleaning up incoming call listener for path: ${incomingCallPath}`);
         removeFirebaseListener(incomingCallPath);
     };
-  }, [sessionUser?.id, processIncomingOfferAndAnswer, toast, addFirebaseListener, removeFirebaseListener, addDebugLog]);
+  }, [sessionUser?.id, processIncomingOfferAndAnswer, addFirebaseListener, removeFirebaseListener, addDebugLog]); // toast removed as it's stable via useToast
 
 
-  // Cleanup effect when component unmounts (e.g. browser tab closed)
+  // Cleanup effect for component unmount
   useEffect(() => {
-    const myId = sessionUser?.id; // Capture at effect setup
+    const myId = sessionUser?.id; 
     return () => {
       addDebugLog(`HomePage unmounting for user ${myId || 'N/A'}. Performing full cleanup.`);
       cleanupWebRTC();
-      cleanupAllFirebaseListeners(); // This includes presence, onlineUsers, and any active call listeners
+      cleanupAllFirebaseListeners();
       
       if (myId) {
-        // This is a more forceful removal attempt, onDisconnect should be primary for tab close
-        remove(ref(db, `onlineUsers/${myId}`)).catch(e => addDebugLog(`WARN: Error removing user from onlineUsers on unmount: ${e}`));
+        // This is secondary to onDisconnect but can help in some scenarios
+        remove(ref(db, `onlineUsers/${myId}`)).catch(e => addDebugLog(`WARN: Error removing user ${myId} from onlineUsers on unmount: ${e}`));
       }
-      cleanupCallData(); // Final attempt to clean any call-specific data
+      cleanupCallData(); 
       addDebugLog(`Full cleanup on unmount complete for ${myId || 'N/A'}.`);
     };
-  }, [sessionUser?.id, cleanupWebRTC, cleanupAllFirebaseListeners, cleanupCallData, addDebugLog]); // sessionUser?.id ensures it re-runs if user changes (though not expected here)
+  }, [sessionUser?.id, cleanupWebRTC, cleanupAllFirebaseListeners, cleanupCallData, addDebugLog]);
 
 
   const handleBackToOnlineUsers = async () => {
     addDebugLog(`Handling back to online users from revealed state.`);
-    await handleEndCall(false); // End call logic, don't show reveal again
-    peerIdRef.current = null; // Clear peerId when going back to idle from revealed
+    // No need to call handleEndCall here as it would have been called to get to revealed state.
+    // If called again, it might try to cleanup already cleaned resources.
+    setChatState('idle');
     setPeerInfo(null);
+    peerIdRef.current = null; // Crucial to clear peerId here
+    roomIdRef.current = null;
+    isCallerRef.current = false;
+    // Ensure WebRTC resources are definitely cleaned, in case of edge case
+    cleanupWebRTC();
+    // Ensure call data is cleaned if it somehow persisted
+    await cleanupCallData();
   };
 
   const toggleMic = () => {
