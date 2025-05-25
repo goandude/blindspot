@@ -7,7 +7,7 @@ import { User, Hourglass } from 'lucide-react';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 
 interface QueuedUsersPanelProps {
-  queuedUserIds: string[];
+  queuedUserIds: string[]; // For now, just IDs. Could be expanded to show names if available.
 }
 
 export function QueuedUsersPanel({ queuedUserIds }: QueuedUsersPanelProps) {
