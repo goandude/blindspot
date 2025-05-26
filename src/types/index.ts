@@ -16,6 +16,7 @@ export interface OnlineUser {
   id: string; // Session ID for anonymous users, Firebase Auth UID if auth is used
   name: string;
   photoUrl?: string; // Optional, can be a placeholder for anonymous users
+  countryCode?: string; // New: For displaying country short name
 }
 
 
@@ -37,6 +38,7 @@ export interface IncomingCallOffer {
   callerId: string;
   callerName:string;
   callerPhotoUrl: string;
+  callerCountryCode?: string; // Added for consistency if needed
 }
 
 export interface CallAnswer {
