@@ -1,22 +1,22 @@
 
-export interface UserProfile {
-  id: string; 
+export interface UserProfile { // Stored in /users/{uid} for Google authenticated users
+  id: string; // Firebase UID
   name: string;
-  email?: string; 
-  photoUrl: string;
-  bio: string;
-  dataAiHint?: string;
-  createdAt?:any; 
+  email?: string;
+  photoUrl?: string; // From Google
+  countryCode?: string;
+  createdAt?: any;
   lastLogin?: any;
-  updatedAt?: any;
 }
 
-// User representation for online list and anonymous sessions
+// User representation for online list and video calls
 export interface OnlineUser {
-  id: string; // Session ID for anonymous users, Firebase Auth UID if auth is used
+  id: string; // Session ID for anonymous users, Firebase Auth UID for Google users
   name: string;
-  photoUrl?: string; // Optional, can be a placeholder for anonymous users
-  countryCode?: string; // New: For displaying country short name
+  photoUrl?: string;
+  countryCode?: string;
+  isGoogleUser?: boolean; // Flag to identify Google authenticated users
+  timestamp?: any; // For Firebase server timestamp
 }
 
 
@@ -37,13 +37,13 @@ export interface IncomingCallOffer {
   offer: RTCSessionDescriptionInit;
   callerId: string;
   callerName:string;
-  callerPhotoUrl: string;
-  callerCountryCode?: string; // Added for consistency if needed
+  callerPhotoUrl?: string;
+  callerCountryCode?: string;
+  callerIsGoogleUser?: boolean;
 }
 
 export interface CallAnswer {
   answer: RTCSessionDescriptionInit;
   calleeId: string;
+  calleeIsGoogleUser?: boolean;
 }
-
-    

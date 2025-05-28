@@ -20,7 +20,7 @@ export function OnlineUsersPanel({ onlineUsers, onInitiateCall, currentUserId }:
   return (
     <Card className="w-full shadow-lg">
       <CardHeader>
-        <CardTitle className="text-xl text-center">Online Users</CardTitle>
+        <CardTitle className="text-xl text-center">Online Users ({otherOnlineUsers.length})</CardTitle>
       </CardHeader>
       <CardContent>
         {otherOnlineUsers.length > 0 ? (
@@ -34,7 +34,10 @@ export function OnlineUsersPanel({ onlineUsers, onInitiateCall, currentUserId }:
                       <AvatarFallback>{user.name ? user.name.charAt(0).toUpperCase() : <User />}</AvatarFallback>
                     </Avatar>
                     <div className="flex flex-col">
-                      <span className="font-medium text-foreground/90">{user.name}</span>
+                      <span className="font-medium text-foreground/90">
+                        {user.name}
+                        {user.isGoogleUser && <span className="text-xs text-primary font-semibold ml-1">(Google)</span>}
+                      </span>
                       {user.countryCode && (
                         <span className="text-xs text-muted-foreground">({user.countryCode})</span>
                       )}
@@ -49,12 +52,10 @@ export function OnlineUsersPanel({ onlineUsers, onInitiateCall, currentUserId }:
           </ScrollArea>
         ) : (
           <p className="text-sm text-muted-foreground text-center py-4">
-            No other users are currently online. Try opening another tab!
+            No other users are currently online.
           </p>
         )}
       </CardContent>
     </Card>
   );
 }
-
-    
