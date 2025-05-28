@@ -10,7 +10,7 @@ import { MainLayout } from '@/components/layout/main-layout';
 import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile } from '@/types';
 import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3 } from 'lucide-react';
 import { db } from '@/lib/firebase'; // Assuming db is correctly initialized
-import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get } from 'firebase/database'; // Assuming these are correctly imported
+import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { OnlineUsersPanel } from '@/components/features/online-users/online-users-panel';
@@ -32,7 +32,7 @@ const generateAnonymousSessionId = () => Math.random().toString(36).substring(2,
 
 export default function HomePage() {
   const [anonymousSessionId, setAnonymousSessionId] = useState<string | null>(null);
-  const [sessionUser, setSessionUser] = useState<OnlineUser | null>(null);
+  const [sessionUser, setSessionUser] = useState<OnlineUser | null>(null); // Can be anonymous or Google User
 
   const [chatState, setChatState] = useState<ChatState>('idle');
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
@@ -42,8 +42,9 @@ export default function HomePage() {
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [peerInfo, setPeerInfo] = useState<OnlineUser | UserProfile | null>(null);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
-  const [pageLoading, setPageLoading] = useState(true);
+  const [pageLoading, setPageLoading] = useState(true); // Combines auth and anonymous session loading
   const [isProfileEditDialogOpen, setIsProfileEditDialogOpen] = useState(false);
+
 
   const { toast } = useToast();
   const {
@@ -64,8 +65,8 @@ export default function HomePage() {
 
   const firebaseListeners = useRef<Map<string, { ref: DatabaseReference, callback: (snapshot: any) => void, eventType: string }>>(new Map());
   const chatStateRef = useRef<ChatState>(chatState);
-  const currentSessionUserIdRef = useRef<string | null>(null);
-
+  const currentSessionUserIdRef = useRef<string | null>(null); // Stores active ID (anon or auth)
+  const isPageVisibleRef = useRef<boolean>(true); // Track page visibility
 
   const addDebugLog = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
@@ -114,14 +115,13 @@ export default function HomePage() {
       };
       setSessionUser(googleSessionUser);
       currentSessionUserIdRef.current = authCurrentUser.uid;
-      setPageLoading(false);
       addDebugLog(`Active session user (Google): ${googleSessionUser.name} (${googleSessionUser.id})`);
+      setPageLoading(false);
     } else if (authCurrentUser && isProfileSetupNeeded) {
       addDebugLog(`Google user ${authCurrentUser.uid} authenticated, but profile setup is needed. Page loading false, ProfileSetupDialog should show.`);
-      setPageLoading(false);
+      setPageLoading(false); // Profile dialog will show
     } else if (!authCurrentUser && anonymousSessionId) {
       addDebugLog(`No Google user. Using anonymous session ID: ${anonymousSessionId}.`);
-      // setPageLoading(true); // Removed to avoid blocking UI unnecessarily before country fetch
       const fetchCountryAndSetAnonymousUser = async () => {
         addDebugLog(`Fetching country for anonymous user ${anonymousSessionId}.`);
         let countryCode = 'XX';
@@ -141,8 +141,8 @@ export default function HomePage() {
         };
         setSessionUser(anonUser);
         currentSessionUserIdRef.current = anonymousSessionId;
-        setPageLoading(false);
         addDebugLog(`Anonymous session user created: ${anonUser.name} (${anonUser.id}) with country ${anonUser.countryCode}`);
+        setPageLoading(false);
       };
       fetchCountryAndSetAnonymousUser();
     } else if (!authCurrentUser && !anonymousSessionId) {
@@ -150,7 +150,7 @@ export default function HomePage() {
         setPageLoading(true);
     } else {
         addDebugLog(`Fell through sessionUser determination logic. Current user: ${authCurrentUser?.uid}, Anon ID: ${anonymousSessionId}. Setting pageLoading to false.`);
-        setPageLoading(false);
+        setPageLoading(false); // Default to false to unblock UI if other conditions aren't met
     }
   }, [authCurrentUser, authUserProfile, anonymousSessionId, authLoading, authProfileLoading, isProfileSetupNeeded, addDebugLog]);
 
@@ -171,13 +171,11 @@ export default function HomePage() {
             addDebugLog(`WARN: Error unsubscribing Firebase listener for path ${path} (type: ${listenerEntry.eventType}): ${error.message || error}`);
         }
         firebaseListeners.current.delete(path);
-    } else {
-        // addDebugLog(`WARN: No listener found for path ${path} to remove.`); // Can be noisy
     }
   }, [addDebugLog]);
 
   const addFirebaseListener = useCallback((dbRef: DatabaseReference, listenerFunc: (snapshot: any) => void, eventType: string = 'value') => {
-    const path = dbRef.toString().substring(dbRef.root.toString().length -1);
+    const path = dbRef.toString().substring(dbRef.root.toString().length -1); // Get path relative to root
     if (firebaseListeners.current.has(path)) {
         addDebugLog(`Listener for path ${path} (type: ${eventType}) already exists. Removing old one first.`);
         removeFirebaseListener(path);
@@ -185,13 +183,21 @@ export default function HomePage() {
 
     const actualCallback = (snapshot: any) => listenerFunc(snapshot);
 
-    onValue(dbRef, actualCallback, (error) => {
+    // For 'value' listeners, onValue itself returns an unsubscribe function.
+    // For other types like 'child_added', etc., you'd use onChildAdded, onChildRemoved, etc.
+    // and manage their specific unsubscribe behavior.
+    // For simplicity, this example primarily uses 'onValue'.
+    // If you use child_added, child_removed etc., you would pass `ref(db, path)` and then call `off(ref(db,path), eventType, actualCallback)`
+    const unsubscribe = onValue(dbRef, actualCallback, (error) => {
         addDebugLog(`ERROR reading from ${path} (event: ${eventType}): ${error.message}`);
         toast({ title: "Firebase Error", description: `Failed to listen to ${path}. Check console.`, variant: "destructive" });
     });
 
     firebaseListeners.current.set(path, { ref: dbRef, callback: actualCallback, eventType });
     addDebugLog(`Added Firebase listener for path: ${path} with eventType: ${eventType}`);
+    // Note: The unsubscribe function from onValue is not directly stored here for this simple map,
+    // as `off(dbRef, eventType, callback)` is used in removeFirebaseListener.
+    // For more complex scenarios, storing the direct unsubscribe function might be better.
   }, [addDebugLog, toast, removeFirebaseListener]);
 
 
@@ -254,6 +260,7 @@ export default function HomePage() {
         if (currentPeerId) remove(ref(db, `iceCandidates/${currentRoomId}/${currentPeerId}`)).catch(e => addDebugLog(`WARN: Error removing peer ICE for room ${currentRoomId}/${currentPeerId}: ${e.message || e}`));
     }
     if (myId) {
+      // Remove pending offer for myself if I was the callee and declined or call ended before full setup
       remove(ref(db, `callSignals/${myId}/pendingOffer`)).catch(e => addDebugLog(`WARN: Error removing my pending offer from callSignals/${myId}/pendingOffer: ${e.message || e}`));
     }
     addDebugLog("Call data cleanup attempt finished.");
@@ -282,7 +289,7 @@ export default function HomePage() {
       let peerToReveal: OnlineUser | UserProfile | null = onlineUsers.find(u => u.id === currentPeerIdVal) ||
                          (peerInfo?.id === currentPeerIdVal ? peerInfo : null);
 
-      if (!peerToReveal && authCurrentUser) { // Only try to fetch full profile if the current user is authenticated (and thus might know about other auth'd users)
+      if (!peerToReveal && authCurrentUser) {
          addDebugLog(`Peer ${currentPeerIdVal} not readily available. Attempting to fetch their UserProfile if they are a Google User.`);
          try {
             const userRef = ref(db, `users/${currentPeerIdVal}`);
@@ -298,17 +305,15 @@ export default function HomePage() {
          }
       }
 
-
       if (!peerToReveal) {
-        addDebugLog(`Peer ${currentPeerIdVal} still not found or is anonymous. Constructing minimal peer info for reveal.`);
-        // Check if peer ID looks like an auth UID or anonymous session ID (heuristic)
-        const tempPeerIsLikelyGoogleUser = currentPeerIdVal.length > 10 && !currentPeerIdVal.includes('-'); // Basic heuristic
+        addDebugLog(`Peer ${currentPeerIdVal} still not found. Constructing minimal peer info for reveal.`);
+        const tempPeerIsLikelyGoogleUser = onlineUsers.find(u => u.id === currentPeerIdVal)?.isGoogleUser || false;
         peerToReveal = {
           id: currentPeerIdVal,
           name: `User-${currentPeerIdVal.substring(0,4)}`,
           photoUrl: `https://placehold.co/96x96.png?text=${currentPeerIdVal.charAt(0).toUpperCase()}`,
           dataAiHint: 'abstract character',
-          countryCode: 'XX', // Country might not be available post-call for anon users
+          countryCode: onlineUsers.find(u => u.id === currentPeerIdVal)?.countryCode || 'XX',
           isGoogleUser: tempPeerIsLikelyGoogleUser
         };
       }
@@ -349,6 +354,7 @@ export default function HomePage() {
         setRemoteStream(event.streams[0]);
         addDebugLog(`Remote stream set from event.streams[0].`);
       } else {
+        // Firefox sometimes doesn't populate event.streams, so create a new stream from the track
         const newStream = new MediaStream([event.track]);
         setRemoteStream(newStream);
         addDebugLog(`Remote stream created from event.track and set.`);
@@ -372,7 +378,7 @@ export default function HomePage() {
       const iceState = peerConnectionRef.current.iceConnectionState;
       addDebugLog(`ICE connection state changed: ${iceState}`);
       if (iceState === 'connected' || iceState === 'completed') {
-        if (['connecting', 'dialing'].includes(chatStateRef.current)) {
+        if (['connecting', 'dialing'].includes(chatStateRef.current)) { // Check against current state in ref
             addDebugLog("ICE fully connected/completed, setting chat state to 'connected'.");
             wrappedSetChatState('connected');
         }
@@ -380,7 +386,7 @@ export default function HomePage() {
         if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
           addDebugLog(`ICE state: ${iceState}. Ending call (showReveal=false).`);
           toast({ title: "Connection Issue", description: `Call state: ${iceState}. Ending call.`, variant: "default" });
-          handleEndCall(false);
+          handleEndCall(false); // No reveal on ICE failure
         }
       }
     };
@@ -389,7 +395,7 @@ export default function HomePage() {
         addDebugLog(`Signaling state changed: ${peerConnectionRef.current.signalingState}`);
     };
     return pc;
-  }, [handleEndCall, toast, addDebugLog, wrappedSetChatState]);
+  }, [handleEndCall, toast, addDebugLog, wrappedSetChatState]); // Dependencies for initializePeerConnection
 
   const startLocalStream = useCallback(async (): Promise<MediaStream | null> => {
     const myId = currentSessionUserIdRef.current;
@@ -416,7 +422,7 @@ export default function HomePage() {
   }, [toast, addDebugLog, handleEndCall, wrappedSetChatState]);
 
   const initiateDirectCall = useCallback(async (targetUser: OnlineUser) => {
-    const sUser = sessionUser;
+    const sUser = sessionUser; // Use state variable sessionUser
     if (!sUser || !sUser.id || targetUser.id === sUser.id) {
       addDebugLog(`Cannot call self or sessionUser is null. MyID: ${sUser?.id}, TargetID: ${targetUser.id}`);
       toast({title: "Call Error", description: "Cannot call self or session is not ready.", variant: "destructive"});
@@ -466,17 +472,18 @@ export default function HomePage() {
           const answerData = snapshot.val() as CallAnswer;
           addDebugLog(`Caller: Received answer from ${answerData.calleeId} for room ${newRoomId}.`);
           if (peerConnectionRef.current.remoteDescription) {
-             addDebugLog(`WARN: Caller: Remote description already set for room ${newRoomId}.`);
+             addDebugLog(`WARN: Caller: Remote description already set for room ${newRoomId}. Current remote: ${peerConnectionRef.current.remoteDescription.type}`);
+             // Potentially ignore if already set, or handle re-negotiation if needed
           }
           try {
             await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answerData.answer));
             addDebugLog(`Caller: Remote desc (answer) set successfully for room ${newRoomId}.`);
           } catch (e: any) {
             addDebugLog(`ERROR: Caller: setting remote desc (answer) for room ${newRoomId}: ${e.message || e}. PC State: ${peerConnectionRef.current.signalingState}`);
-            handleEndCall(false);
+            handleEndCall(false); // End call on error
             return;
           }
-          removeFirebaseListener(answerDbRefPath);
+          removeFirebaseListener(answerDbRefPath); // Remove listener after processing
           remove(ref(db, answerDbRefPath)).catch(e => addDebugLog(`WARN: Error removing answer from ${answerDbRefPath}: ${e.message || e}`));
         } else if (snapshot.exists() && (!peerConnectionRef.current || peerConnectionRef.current.signalingState === 'closed')) {
             addDebugLog(`Caller: Received answer for room ${newRoomId}, but peer connection is null or closed. Ignoring.`);
@@ -501,7 +508,7 @@ export default function HomePage() {
                  addDebugLog(`WARN: Caller received callee ICE for room ${newRoomId} but peer connection is null or closed.`);
             }
         });
-      }, 'value');
+      }, 'value'); // Listen to 'value' to get all candidates, not just child_added
 
     } catch (error: any) {
       addDebugLog(`ERROR initiating call from ${sUser.id} to ${targetUser.id} (room ${roomIdRef.current}): ${error.message || error}`);
@@ -511,7 +518,7 @@ export default function HomePage() {
   }, [sessionUser, initializePeerConnection, handleEndCall, toast, addFirebaseListener, removeFirebaseListener, startLocalStream, addDebugLog, wrappedSetChatState]);
 
   const processIncomingOfferAndAnswer = useCallback(async (offerData: IncomingCallOffer) => {
-    const sUser = sessionUser;
+    const sUser = sessionUser; // Use state variable sessionUser
     if (!sUser || !sUser.id ) {
       addDebugLog(`processIncomingOffer: No sessionUser, cannot process offer from ${offerData.callerId}.`);
       if(sUser?.id) remove(ref(db, `callSignals/${sUser.id}/pendingOffer`)).catch(e => addDebugLog(`WARN: Callee: Error removing stale pending offer (no sessionUser): ${e.message || e}`));
@@ -524,10 +531,11 @@ export default function HomePage() {
     }
     addDebugLog(`Callee ${sUser.id}: Processing incoming offer from ${offerData.callerName} (${offerData.callerId}). Room: ${offerData.roomId}.`);
 
+    // Automatically accept call
     wrappedSetChatState('connecting');
     peerIdRef.current = offerData.callerId; roomIdRef.current = offerData.roomId; isCallerRef.current = false;
 
-    const peerForInfo: OnlineUser = {
+    const peerForInfo: OnlineUser = { // Construct peer info for display
         id: offerData.callerId, name: offerData.callerName, photoUrl: offerData.callerPhotoUrl,
         countryCode: offerData.callerCountryCode || 'XX', isGoogleUser: offerData.callerIsGoogleUser || false,
     };
@@ -557,10 +565,12 @@ export default function HomePage() {
       await set(ref(db, answerPath), answerPayload);
       addDebugLog(`Callee ${sUser.id}: Answer sent to room ${offerData.roomId}.`);
 
+      // Offer processed, remove it
       const myOfferPath = `callSignals/${sUser.id}/pendingOffer`;
       await remove(ref(db, myOfferPath));
       addDebugLog(`Callee ${sUser.id}: Removed processed pending offer from ${myOfferPath}.`);
 
+      // Listen for caller's ICE candidates
       const callerIceCandidatesRefPath = `iceCandidates/${offerData.roomId}/${offerData.callerId}`;
       addFirebaseListener(ref(db, callerIceCandidatesRefPath), (snapshot: any) => {
         snapshot.forEach((childSnapshot: any) => {
@@ -579,13 +589,13 @@ export default function HomePage() {
                  addDebugLog(`WARN: Callee ${sUser.id} received caller ICE for room ${offerData.roomId} but peer connection is null or closed.`);
             }
         });
-      }, 'value');
+      }, 'value'); // Listen to 'value' to get all candidates
     } catch (error: any) {
       addDebugLog(`Callee ${sUser.id}: ERROR processing offer for room ${offerData.roomId}: ${error.message || error}`);
       toast({ title: "Call Error", variant: "destructive", description: "Could not process incoming call." });
       await handleEndCall(false);
     }
-  }, [sessionUser, initializePeerConnection, handleEndCall, toast, addFirebaseListener, startLocalStream, addDebugLog, wrappedSetChatState, removeFirebaseListener]);
+  }, [sessionUser, initializePeerConnection, handleEndCall, toast, addFirebaseListener, startLocalStream, addDebugLog, wrappedSetChatState]); // Dependencies for processIncomingOfferAndAnswer
 
   // ANONYMOUS Presence system (only if not Google authenticated)
   useEffect(() => {
@@ -594,8 +604,9 @@ export default function HomePage() {
       return;
     }
 
+    // Ensure sessionUser is the anonymous one before setting up presence
     if (!sessionUser || sessionUser.id !== anonymousSessionId || sessionUser.isGoogleUser) {
-      addDebugLog(`Anonymous Presence: Skipping - sessionUser (${sessionUser?.id}, isGoogle: ${sessionUser?.isGoogleUser}) not aligned with anonymous state (${anonymousSessionId}).`);
+      addDebugLog(`Anonymous Presence: Skipping - sessionUser (${sessionUser?.id}, isGoogle: ${sessionUser?.isGoogleUser}) not aligned with anonymous state (${anonymousSessionId}). Waiting for sessionUser to update.`);
       return;
     }
 
@@ -606,12 +617,21 @@ export default function HomePage() {
     const connectedDbRef = ref(db, '.info/connected');
 
     const presenceCb = (snapshot: any) => {
+      if (!currentSessionUserIdRef.current || currentSessionUserIdRef.current !== myId || authCurrentUser) {
+        addDebugLog(`Anonymous Presence for ${myId}: Skipping update. Current user ref ${currentSessionUserIdRef.current} or authUser ${authCurrentUser?.uid} exists.`);
+        return;
+      }
       if (snapshot.val() === true) {
         addDebugLog(`Anonymous Presence: Firebase connection established for ${myId}.`);
         const currentAnonUser = sessionUser; // Re-evaluate sessionUser from the closure
-        if (currentAnonUser && currentAnonUser.id === myId && !currentAnonUser.isGoogleUser) {
+        if (currentAnonUser && currentAnonUser.id === myId && !currentAnonUser.isGoogleUser && isPageVisibleRef.current) {
             const presenceData: OnlineUser = {
-              ...currentAnonUser,
+              id: myId, // Ensure ID is explicitly set
+              name: currentAnonUser.name,
+              photoUrl: currentAnonUser.photoUrl,
+              dataAiHint: currentAnonUser.dataAiHint,
+              countryCode: currentAnonUser.countryCode,
+              isGoogleUser: false,
               timestamp: serverTimestamp()
             };
             set(userStatusDbRef, presenceData)
@@ -626,7 +646,7 @@ export default function HomePage() {
                 addDebugLog(`Anonymous Presence: ERROR - userStatusDbRef or userStatusDbRef.onDisconnect is not valid. userStatusDbRef type: ${typeof userStatusDbRef}. Path: ${userStatusDbRef?.toString()}`);
             }
         } else {
-            addDebugLog(`Anonymous Presence: current sessionUser (${currentAnonUser?.id}, isGoogle: ${currentAnonUser?.isGoogleUser}) doesn't match anonymous ID ${myId} during connected event. Aborting set online.`);
+            addDebugLog(`Anonymous Presence: current sessionUser (${currentAnonUser?.id}, isGoogle: ${currentAnonUser?.isGoogleUser}) doesn't match anonymous ID ${myId} or page not visible (${isPageVisibleRef.current}). Aborting set online.`);
         }
       } else {
         addDebugLog(`Anonymous Presence: Firebase connection lost for ${myId}.`);
@@ -638,7 +658,6 @@ export default function HomePage() {
     return () => {
       addDebugLog(`Anonymous Presence: Cleaning up for session user: ${myId}. Detaching .info/connected listener.`);
       removeFirebaseListener(connectedDbRef.toString().substring(connectedDbRef.root.toString().length-1));
-      // Explicit removal on unmount/cleanup if onDisconnect is not reliable enough
       if (myId) { // Ensure myId is valid before attempting removal
         const pathToRemove = `onlineUsers/${myId}`;
         remove(ref(db, pathToRemove))
@@ -646,7 +665,7 @@ export default function HomePage() {
             .catch(e => addDebugLog(`Anonymous Presence: WARN: Error explicitly removing user ${myId} from ${pathToRemove} on cleanup: ${e.message || e}`));
       }
     };
-  }, [authCurrentUser, anonymousSessionId, sessionUser, addFirebaseListener, removeFirebaseListener, addDebugLog]);
+  }, [authCurrentUser, anonymousSessionId, sessionUser, addFirebaseListener, removeFirebaseListener, addDebugLog]); // Dependencies for anonymous presence
 
 
   // Listener for all online users
@@ -666,11 +685,11 @@ export default function HomePage() {
         }
       }
       const activeUserId = currentSessionUserIdRef.current;
-      setOnlineUsers(userList.filter(u => u.id !== activeUserId));
+      setOnlineUsers(userList.filter(u => u.id !== activeUserId)); // Filter out self
     };
     addFirebaseListener(onlineUsersDbRef, onlineUsersCb, 'value');
     return () => removeFirebaseListener(onlineUsersDbRef.toString().substring(onlineUsersDbRef.root.toString().length-1));
-  }, [addFirebaseListener, removeFirebaseListener, addDebugLog]);
+  }, [addFirebaseListener, removeFirebaseListener, addDebugLog]); // currentSessionUserIdRef is not needed here as filter is local
 
 
   // Listener for incoming calls (auto-accepted)
@@ -690,13 +709,15 @@ export default function HomePage() {
       addDebugLog(`Offer listener at ${incomingCallDbRefPath} triggered. Data exists: ${!!offerData}. Current chat state: ${chatStateRef.current}`);
 
       if (offerData) {
-        if (chatStateRef.current === 'idle') {
+        if (chatStateRef.current === 'idle') { // Only process if idle
           addDebugLog(`Valid offer received by ${myId} from ${offerData.callerName} (room ${offerData.roomId}). Processing...`);
-          await processIncomingOfferAndAnswer(offerData);
+          await processIncomingOfferAndAnswer(offerData); // This will also remove the offer from DB
         } else {
           addDebugLog(`WARN: ${myId} received offer from ${offerData.callerId} (room ${offerData.roomId}) while in state ${chatStateRef.current}. Removing stale offer.`);
           remove(incomingCallDbRef).catch(e => addDebugLog(`WARN: Error removing stale offer by ${myId}: ${e.message || e}`));
         }
+      } else {
+        addDebugLog(`Offer listener at ${incomingCallDbRefPath} received null data (offer likely removed/processed or this is initial load).`);
       }
     };
 
@@ -708,15 +729,64 @@ export default function HomePage() {
   }, [currentSessionUserIdRef.current, processIncomingOfferAndAnswer, addFirebaseListener, removeFirebaseListener, addDebugLog]);
 
 
+  // Page Visibility API for presence
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      const currentSUser = sessionUser; // Capture current sessionUser
+      if (!currentSUser || !currentSUser.id) return;
+
+      const userOnlinePath = `onlineUsers/${currentSUser.id}`;
+
+      if (document.hidden) {
+        addDebugLog(`Page hidden. Removing ${currentSUser.id} from online list.`);
+        isPageVisibleRef.current = false;
+        remove(ref(db, userOnlinePath)).catch(e => addDebugLog(`Error removing user on page hide: ${e.message}`));
+      } else {
+        addDebugLog(`Page visible. Re-adding ${currentSUser.id} to online list.`);
+        isPageVisibleRef.current = true;
+        const presenceData: OnlineUser = {
+          ...currentSUser,
+          timestamp: serverTimestamp(),
+        };
+        set(ref(db, userOnlinePath), presenceData).catch(e => addDebugLog(`Error re-adding user on page visible: ${e.message}`));
+        // Re-establish onDisconnect for the specific user type
+        if (currentSUser.isGoogleUser && authCurrentUser) {
+          // Authenticated user onDisconnect is handled by useAuth
+        } else if (!currentSUser.isGoogleUser && anonymousSessionId === currentSUser.id) {
+          // Anonymous user, re-set onDisconnect
+          const userStatusDbRef = ref(db, userOnlinePath);
+          userStatusDbRef.onDisconnect().remove()
+            .then(() => addDebugLog(`Anonymous Presence: onDisconnect().remove() re-set for ${currentSUser.id} on page visible.`))
+            .catch(e => addDebugLog(`Anonymous Presence: ERROR re-setting onDisconnect for ${currentSUser.id}: ${e.message || e}`));
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    // For mobile browsers that might use pagehide/pageshow
+    window.addEventListener('pagehide', handleVisibilityChange);
+    window.addEventListener('pageshow', handleVisibilityChange);
+
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('pagehide', handleVisibilityChange);
+      window.removeEventListener('pageshow', handleVisibilityChange);
+      addDebugLog("Cleaned up Page Visibility listeners.");
+    };
+  }, [sessionUser, addDebugLog, authCurrentUser, anonymousSessionId]); // Re-run if sessionUser changes
+
+
   // Cleanup effect for component unmount
   useEffect(() => {
     const myIdOnUnmount = currentSessionUserIdRef.current;
     return () => {
       addDebugLog(`HomePage unmounting for user ${myIdOnUnmount || 'N/A'}. Performing full cleanup.`);
-      handleEndCall(false);
+      handleEndCall(false); // End any active call, don't show reveal
       cleanupAllFirebaseListeners();
 
-      if (myIdOnUnmount && !authCurrentUser) {
+      // Explicit removal for anonymous user on unmount in case onDisconnect didn't fire or visibility change missed
+      if (myIdOnUnmount && !authCurrentUser) { // Only if it was an anonymous session
         const userStatusDbRefPath = `onlineUsers/${myIdOnUnmount}`;
         remove(ref(db, userStatusDbRefPath))
             .then(() => addDebugLog(`Anonymous Presence: Explicitly removed user ${myIdOnUnmount} from ${userStatusDbRefPath} on unmount.`))
@@ -725,7 +795,7 @@ export default function HomePage() {
       addDebugLog(`Full cleanup on unmount complete for ${myIdOnUnmount || 'N/A'}.`);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authCurrentUser]); 
+  }, [authCurrentUser]); // Run this main cleanup only based on authCurrentUser changes or unmount
 
 
   const handleBackToOnlineUsers = async () => {
@@ -752,7 +822,7 @@ export default function HomePage() {
   };
 
   const handleFeelingLucky = () => {
-    if (!sessionUser) {
+    if (!sessionUser) { // Check current session user
         addDebugLog("Feeling Lucky: No session user to initiate call.");
         toast({ title: "Error", description: "Session not ready.", variant: "destructive"}); return;
     }
@@ -770,10 +840,11 @@ export default function HomePage() {
   const handleProfileSave = async (data: UserProfile) => {
     addDebugLog(`Profile save requested with data: ${JSON.stringify(data)}`);
     try {
-        await updateUserProfile(data);
+        await updateUserProfile(data); // This comes from useAuth hook
         setIsProfileEditDialogOpen(false);
     } catch (error) {
         addDebugLog(`Error saving profile: ${error}`);
+        // Toast for error is likely handled within updateUserProfile
     }
 };
 
@@ -787,15 +858,16 @@ export default function HomePage() {
           <p className="mt-4 text-muted-foreground">
             {authLoading && "Authenticating..."}
             {authCurrentUser && authProfileLoading && "Loading your profile..."}
-            {!authLoading && !authCurrentUser && "Initializing your session..."}
-            {pageLoading && !authLoading && !authProfileLoading && "Finalizing session setup..."}
+            {!authLoading && !authCurrentUser && !sessionUser && "Initializing your session..."}
+            {pageLoading && !authLoading && !authProfileLoading && !sessionUser && "Finalizing session setup..."}
+            {sessionUser && "Session active..."}
           </p>
         </div>
       </MainLayout>
     );
   }
 
-  if (authCurrentUser && isProfileSetupNeeded && !authProfileLoading) {
+  if (authCurrentUser && isProfileSetupNeeded && !authProfileLoading) { // Check authProfileLoading here
     return (
         <MainLayout>
              <div className="absolute top-4 right-4">
@@ -804,28 +876,28 @@ export default function HomePage() {
                 </Button>
             </div>
             <ProfileSetupDialog
-                isOpen={true}
+                isOpen={true} // Dialog is controlled by this condition
                 onOpenChange={(open) => {
                     if (!open) {
                         addDebugLog("Profile setup dialog closed by user (without saving). Potentially signing out or handling differently.");
-                        // Decide if user should be signed out or allowed to proceed anonymously if they cancel setup.
-                        // For now, just logs. User remains in profile setup limbo until saved or signed out.
+                        // Consider implications: if they close, should they be signed out? For now, they remain in this state.
                     }
                 }}
                 user={{id: authCurrentUser.uid, name: authCurrentUser.displayName || '', email: authCurrentUser.email || '', photoUrl: authCurrentUser.photoURL || undefined}}
                 onSave={handleProfileSave}
-                existingProfile={authUserProfile}
+                existingProfile={authUserProfile} // Pass existing profile, could be partially filled
             />
         </MainLayout>
     );
   }
 
-  if (!sessionUser && !authLoading && !pageLoading) {
+  // Fallback if sessionUser is somehow not set after loading states are false
+  if (!sessionUser && !authLoading && !authProfileLoading) {
     return (
        <MainLayout><p className="text-destructive">Error: Session could not be initialized. Please refresh.</p></MainLayout>
     );
   }
-
+  // If sessionUser is still null at this point, show a generic loading until it's resolved.
   if (!sessionUser) {
       return (
         <MainLayout>
@@ -838,6 +910,7 @@ export default function HomePage() {
       );
   }
 
+
   // Main content
   return (
     <MainLayout>
@@ -848,25 +921,28 @@ export default function HomePage() {
           </Button>
         ) : (
           <>
-            <Button onClick={() => setIsProfileEditDialogOpen(true)} variant="outline">
-                <Edit3 className="mr-2 h-4 w-4" /> Edit Profile
-            </Button>
+            {authUserProfile && ( // Only show edit if profile exists
+                <Button onClick={() => setIsProfileEditDialogOpen(true)} variant="outline">
+                    <Edit3 className="mr-2 h-4 w-4" /> Edit Profile
+                </Button>
+            )}
             <Button onClick={signOutUser} variant="outline">
                 <LogOut className="mr-2 h-4 w-4" /> Sign Out
             </Button>
-            {authUserProfile && (
+            {/* Profile Edit Dialog - rendered conditionally if authUserProfile exists */}
+            {authUserProfile && authCurrentUser && (
                 <ProfileSetupDialog
                     isOpen={isProfileEditDialogOpen}
                     onOpenChange={setIsProfileEditDialogOpen}
                     user={{
-                        uid: authCurrentUser.uid,
+                        uid: authCurrentUser.uid, // useAuth hook provides FirebaseUser type
                         displayName: authCurrentUser.displayName || '',
                         email: authCurrentUser.email || '',
                         photoUrl: authCurrentUser.photoURL || undefined
                     }}
                     onSave={handleProfileSave}
                     isEditing={true}
-                    existingProfile={authUserProfile}
+                    existingProfile={authUserProfile} // Pass the loaded profile for editing
                 />
             )}
           </>
@@ -878,7 +954,7 @@ export default function HomePage() {
         <p className="text-lg text-foreground/80">Connect Directly. Chat Visually.</p>
       </div>
 
-      {chatState === 'idle' && (
+      {chatState === 'idle' && sessionUser && (
         <div className="flex flex-col items-center gap-6 p-6 bg-card rounded-xl shadow-xl w-full max-w-lg">
            <Card className="w-full max-w-md shadow-md border-primary/50">
             <CardHeader className="items-center text-center pb-4">
@@ -923,13 +999,14 @@ export default function HomePage() {
             <Button onClick={() => handleEndCall(true)} size="lg" className="flex-1" variant="destructive">
               <PhoneOff className="mr-2 h-5 w-5" /> End Call
             </Button>
-             {chatState === 'connected' && peerInfo && authCurrentUser && (peerInfo as OnlineUser).isGoogleUser && (
+             {/* Report button during connected state - ensure peerInfo is UserProfile or OnlineUser for reporting */}
+             {chatState === 'connected' && peerInfo && (peerInfo as OnlineUser | UserProfile).id && authCurrentUser && (peerInfo as OnlineUser).isGoogleUser && (
                 <ReportDialog
                 reportedUser={{
-                    id: peerInfo.id,
+                    id: (peerInfo as UserProfile).id, // Ensure ID is available
                     name: (peerInfo as UserProfile).name || (peerInfo as OnlineUser).name,
                     photoUrl: (peerInfo as UserProfile).photoUrl || (peerInfo as OnlineUser).photoUrl || '',
-                    bio: (peerInfo as UserProfile).bio || ''
+                    bio: (peerInfo as UserProfile).bio || '' // Bio might only be on UserProfile
                 }}
                 triggerButtonText="Report User" triggerButtonVariant="outline" triggerButtonFullWidth={true}
                 />
@@ -944,18 +1021,18 @@ export default function HomePage() {
           {peerInfo ? (
             <>
               <p className="text-muted-foreground">
-                You chatted with {(peerInfo as OnlineUser).name}
+                You chatted with {(peerInfo as OnlineUser).name || 'a user'}
                 {(peerInfo as OnlineUser).isGoogleUser && <span className="text-xs text-primary font-semibold ml-1">(Google)</span>}
                 {(peerInfo as OnlineUser).countryCode && ` (${(peerInfo as OnlineUser).countryCode})`}.
               </p>
               <Card className="w-full max-w-sm p-6 bg-background shadow-lg rounded-xl border-primary/50">
                 <div className="flex flex-col items-center text-center">
                     <Avatar className="w-24 h-24 mb-4 border-2 border-primary shadow-md">
-                        <AvatarImage src={(peerInfo as UserProfile).photoUrl || (peerInfo as OnlineUser).photoUrl} alt={(peerInfo as OnlineUser).name} data-ai-hint={(peerInfo as UserProfile).dataAiHint || "avatar abstract"}/>
-                        <AvatarFallback>{(peerInfo as OnlineUser).name.charAt(0).toUpperCase()}</AvatarFallback>
+                        <AvatarImage src={(peerInfo as UserProfile).photoUrl || (peerInfo as OnlineUser).photoUrl} alt={(peerInfo as OnlineUser).name} data-ai-hint={(peerInfo as OnlineUser).dataAiHint || (peerInfo as UserProfile).dataAiHint || "avatar abstract"}/>
+                        <AvatarFallback>{(peerInfo as OnlineUser).name ? (peerInfo as OnlineUser).name.charAt(0).toUpperCase() : 'U'}</AvatarFallback>
                     </Avatar>
                     <h3 className="text-2xl font-semibold">{(peerInfo as OnlineUser).name}</h3>
-                    <p className="text-sm text-muted-foreground">ID: {peerInfo.id.substring(0,8)}... {(peerInfo as OnlineUser).countryCode && `(${(peerInfo as OnlineUser).countryCode})`}</p>
+                    <p className="text-sm text-muted-foreground">ID: {(peerInfo as OnlineUser | UserProfile).id.substring(0,8)}... {(peerInfo as OnlineUser).countryCode && `(${(peerInfo as OnlineUser).countryCode})`}</p>
                     {(peerInfo as UserProfile).bio && <p className="text-xs text-muted-foreground">Bio: {(peerInfo as UserProfile).bio}</p>}
                 </div>
               </Card>
@@ -965,10 +1042,11 @@ export default function HomePage() {
             <Button onClick={handleBackToOnlineUsers} size="lg" variant="secondary" className="flex-1">
               <VideoIcon className="mr-2 h-5 w-5" /> Back to Online Users
             </Button>
-            {peerInfo && authCurrentUser && (peerInfo as OnlineUser).isGoogleUser &&(
+            {/* Report button on revealed screen */}
+            {peerInfo && (peerInfo as OnlineUser | UserProfile).id && authCurrentUser && (peerInfo as OnlineUser).isGoogleUser &&(
                  <ReportDialog
                  reportedUser={{
-                    id: peerInfo.id,
+                    id: (peerInfo as UserProfile).id,
                     name: (peerInfo as UserProfile).name || (peerInfo as OnlineUser).name,
                     photoUrl: (peerInfo as UserProfile).photoUrl || (peerInfo as OnlineUser).photoUrl || '',
                     bio: (peerInfo as UserProfile).bio || ''
@@ -985,4 +1063,3 @@ export default function HomePage() {
     </MainLayout>
   );
 }
-
