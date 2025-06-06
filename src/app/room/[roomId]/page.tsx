@@ -22,7 +22,6 @@ const servers = {
   ],
 };
 
-// Interface for the new remoteStreams state structure
 interface RemoteStreamEntry {
   stream: MediaStream;
   userInfo?: OnlineUser;
@@ -36,6 +35,7 @@ export default function RoomPage() {
 
   const { currentUser: authCurrentUser, userProfile: authUserProfile, loading: authLoading } = useAuth();
   const [sessionUser, setSessionUser] = useState<OnlineUser | null>(null);
+  const generatedAnonymousIdRef = useRef<string | null>(null); // To store the ID if generated
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStreamEntry>>(new Map());
@@ -46,7 +46,7 @@ export default function RoomPage() {
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [isInRoom, setIsInRoom] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(true); // Start true
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
 
   const firebaseListeners = useRef<Map<string, { ref: DatabaseReference, callback: (snapshot: any) => void, eventType: string }>>(new Map());
@@ -57,11 +57,11 @@ export default function RoomPage() {
 
   const addDebugLog = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
-    const currentSId = sessionUser?.id || 'N/A';
+    const currentSId = sessionUser?.id || generatedAnonymousIdRef.current ||'N/A';
     const prefix = `[${currentSId.substring(0, 4)}] [Room ${roomId?.substring(0,4) || 'N/A'}] `;
     const logEntry = `[${timestamp}] ${prefix}${message}`;
     setDebugLogs(prevLogs => [logEntry, ...prevLogs].slice(0, 100));
-  }, [sessionUser, roomId]);
+  }, [sessionUser, roomId]); // Keep sessionUser here for accurate logging once it's set
 
   const addFirebaseDbListener = useCallback((dbRef: DatabaseReference, callback: (snapshot: any) => void, eventType: 'value' | 'child_added' | 'child_changed' | 'child_removed' = 'value') => {
     const path = dbRef.toString().substring(dbRef.root.toString().length -1);
@@ -89,40 +89,68 @@ export default function RoomPage() {
 
 
   useEffect(() => {
+    addDebugLog(`Auth state check: authLoading=${authLoading}, authCurrentUser=${!!authCurrentUser}, authUserProfile=${!!authUserProfile}, current sessionUser=${!!sessionUser}, generatedAnonId=${generatedAnonymousIdRef.current}`);
     if (authLoading) {
-      addDebugLog("Auth still loading, waiting...");
+      addDebugLog("Auth still loading, RoomPage waiting...");
+      if (!isLoading) setIsLoading(true); // Ensure isLoading remains true
       return;
     }
 
+    // If sessionUser is already determined, we are good.
+    if (sessionUser) {
+      if (isLoading) setIsLoading(false);
+      return;
+    }
+
+    // Auth is loaded (authLoading is false)
     if (authCurrentUser && authUserProfile) {
-      addDebugLog(`Authenticated user: ${authUserProfile.name} (${authCurrentUser.uid})`);
+      addDebugLog(`Authenticated user for room: ${authUserProfile.name} (${authCurrentUser.uid})`);
       const googleSessionUser: OnlineUser = {
-        id: authCurrentUser.uid, name: authUserProfile.name, photoUrl: authUserProfile.photoUrl,
-        dataAiHint: authUserProfile.dataAiHint, countryCode: authUserProfile.countryCode, isGoogleUser: true,
+        id: authCurrentUser.uid,
+        name: authUserProfile.name,
+        photoUrl: authUserProfile.photoUrl,
+        dataAiHint: authUserProfile.dataAiHint,
+        countryCode: authUserProfile.countryCode,
+        isGoogleUser: true,
       };
       setSessionUser(googleSessionUser);
       setIsLoading(false);
-    } else if (!authCurrentUser) {
-      addDebugLog("No authenticated user, creating anonymous session for room.");
-      const anonymousRoomId = `anon-${Math.random().toString(36).substring(2, 10)}`;
-       const fetchCountryAndSetAnonymousUser = async () => {
+    } else if (!authCurrentUser) { // Auth loaded, no user signed in -> create anonymous session user
+      if (!generatedAnonymousIdRef.current) { // Generate ID only once per component lifecycle for anon users
+        generatedAnonymousIdRef.current = `anon-room-${Math.random().toString(36).substring(2, 10)}`;
+        addDebugLog(`Generated new anonymous ID for room: ${generatedAnonymousIdRef.current}`);
+      }
+      const currentAnonId = generatedAnonymousIdRef.current!;
+
+      addDebugLog(`Creating anonymous session for room with ID: ${currentAnonId}.`);
+      const fetchCountryAndSetAnonymousUser = async () => {
         let countryCode = 'XX';
         try {
           const response = await fetch('https://ipapi.co/country_code/');
           if (response.ok) countryCode = (await response.text()).trim();
-        } catch (e) { /* ignore */ }
+          else addDebugLog(`Failed to fetch country for anon user: ${response.status}`);
+        } catch (e: any) {
+          addDebugLog(`WARN: Error fetching country for anonymous user: ${e.message || e}`);
+        }
         const anonUser: OnlineUser = {
-          id: anonymousRoomId, name: `User-${anonymousRoomId.substring(5, 9)}`,
-          photoUrl: `https://placehold.co/96x96.png?text=${anonymousRoomId.charAt(5).toUpperCase()}`,
-          dataAiHint: 'abstract character', countryCode, isGoogleUser: false,
+          id: currentAnonId,
+          name: `User-${currentAnonId.substring(10, 14)}`, // Use a consistent part of the ID
+          photoUrl: `https://placehold.co/96x96.png?text=${currentAnonId.charAt(10).toUpperCase()}`,
+          dataAiHint: 'abstract character',
+          countryCode,
+          isGoogleUser: false,
         };
         setSessionUser(anonUser);
         setIsLoading(false);
-        addDebugLog(`Anonymous session for room: ${anonUser.name} (${anonUser.id})`);
+        addDebugLog(`Anonymous session for room created: ${anonUser.name} (${anonUser.id})`);
       };
       fetchCountryAndSetAnonymousUser();
+    } else {
+      // AuthCurrentUser exists but no authUserProfile (or profile is incomplete for room purposes)
+      addDebugLog("Auth user exists but profile might be incomplete. RoomPage continues loading or awaiting profile.");
+      if (!isLoading) setIsLoading(true); // Keep loading or handle as an error/redirect
     }
-  }, [authCurrentUser, authUserProfile, authLoading, addDebugLog]);
+  }, [authCurrentUser, authUserProfile, authLoading, addDebugLog, sessionUser, isLoading]);
 
 
   const cleanupPeerConnection = useCallback((peerId: string) => {
@@ -157,7 +185,7 @@ export default function RoomPage() {
       addDebugLog("Local stream stopped.");
     }
 
-    peerConnectionsRef.current.forEach((_, peerId) => { // Changed pc to _
+    peerConnectionsRef.current.forEach((_, peerId) => { 
       addDebugLog(`Cleaning up PC for ${peerId} during leave room.`);
       cleanupPeerConnection(peerId);
     });
@@ -237,17 +265,19 @@ export default function RoomPage() {
               addDebugLog(`Added track ${track.kind} to stream for ${peerId}`);
           }
         });
+        
+        let userInfoChanged = false;
+        if (currentParticipantData) {
+            if (!entry.userInfo || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl) {
+                userInfoChanged = true;
+            }
+        } else if (entry.userInfo) { // Participant data not found but we have old info
+            userInfoChanged = true;
+        }
 
-        // Update userInfo if it has changed or needs to be set
-        if (currentParticipantData && (!entry.userInfo || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl)) {
-            entry.userInfo = currentParticipantData;
-            // Ensure a new object reference for the entry to trigger React update for VideoFeed
-            newRemoteStreams.set(peerId, { ...entry, userInfo: currentParticipantData });
-            addDebugLog(`Updated userInfo for ${peerId}`);
-        } else if (!currentParticipantData && entry.userInfo) {
-            entry.userInfo = undefined;
-            newRemoteStreams.set(peerId, { ...entry, userInfo: undefined });
-            addDebugLog(`Cleared userInfo for ${peerId} as participant data not found`);
+        if (userInfoChanged) {
+            newRemoteStreams.set(peerId, { ...entry, userInfo: currentParticipantData }); // Create new object for the map value
+            addDebugLog(`Updated userInfo for ${peerId}. New name: ${currentParticipantData?.name}`);
         }
         
         addDebugLog(`Updated remote stream for ${peerId}. Total tracks in stream: ${entry.stream.getTracks().length}`);
@@ -281,7 +311,7 @@ export default function RoomPage() {
       addDebugLog(`Error creating/sending offer to ${peerId}: ${error.message}`);
       cleanupPeerConnection(peerId);
     }
-  }, [localStream, roomId, sessionUser, addDebugLog, cleanupPeerConnection]);
+  }, [localStream, roomId, sessionUser, addDebugLog, cleanupPeerConnection]); // Removed participants and remoteStreams
 
   useEffect(() => {
     if (!isInRoom || !roomId || !sessionUser?.id || !localStream) {
@@ -308,7 +338,7 @@ export default function RoomPage() {
         if (type === 'offer') {
           if (pc && pc.signalingState !== 'closed') {
             addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists and is not closed. State: ${pc.signalingState}. Cleaning up old one.`);
-            cleanupPeerConnection(senderId); // Clean up old before creating new
+            cleanupPeerConnection(senderId); 
           }
           
           pc = new RTCPeerConnection(servers);
@@ -355,16 +385,19 @@ export default function RoomPage() {
                     }
                 });
                 
-                if (currentParticipantData && (!entry.userInfo || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl)) {
-                    entry.userInfo = currentParticipantData;
-                    newRemoteStreams.set(senderId, { ...entry, userInfo: currentParticipantData });
-                     addDebugLog(`Updated userInfo for ${senderId} via offer path`);
-                } else if (!currentParticipantData && entry.userInfo) {
-                    entry.userInfo = undefined;
-                    newRemoteStreams.set(senderId, { ...entry, userInfo: undefined });
-                    addDebugLog(`Cleared userInfo for ${senderId} via offer path`);
+                let userInfoChanged = false;
+                if (currentParticipantData) {
+                    if (!entry.userInfo || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl) {
+                        userInfoChanged = true;
+                    }
+                } else if (entry.userInfo) {
+                    userInfoChanged = true;
                 }
 
+                if (userInfoChanged) {
+                    newRemoteStreams.set(senderId, { ...entry, userInfo: currentParticipantData });
+                    addDebugLog(`Updated userInfo for ${senderId} via offer path. New name: ${currentParticipantData?.name}`);
+                }
                 addDebugLog(`Updated remote stream for ${senderId} (on offer path). Total tracks: ${entry.stream.getTracks().length}`);
                 return newRemoteStreams;
               });
@@ -442,7 +475,7 @@ export default function RoomPage() {
         }
       });
       
-      peerConnectionsRef.current.forEach((_, pcPeerId) => { // Renamed pc to _ and peerId to pcPeerId
+      peerConnectionsRef.current.forEach((_, pcPeerId) => { 
         if (!newParticipantsList.find(p => p.id === pcPeerId)) {
           addDebugLog(`Participant ${pcPeerId} left. Cleaning up their connection.`);
           cleanupPeerConnection(pcPeerId);
@@ -573,25 +606,25 @@ export default function RoomPage() {
   };
 
 
-  if (isLoading || !roomId) {
+  if (isLoading || !roomId) { // isLoading check ensures sessionUser determination (including anon) is complete
     return (
       <MainLayout>
         <Card className="w-full max-w-md p-8 text-center">
           <Skeleton className="h-8 w-3/4 mx-auto mb-4" />
           <Skeleton className="h-10 w-1/2 mx-auto" />
-          <p className="mt-4 text-muted-foreground">Loading room...</p>
+          <p className="mt-4 text-muted-foreground">Loading room and session...</p>
         </Card>
       </MainLayout>
     );
   }
   
-  if (!sessionUser) {
+  if (!sessionUser) { // Should ideally not be hit if isLoading is false, but as a safeguard
      return (
       <MainLayout>
         <Card className="w-full max-w-md p-8 text-center">
             <AlertTriangle className="w-12 h-12 text-destructive mx-auto mb-4" />
             <CardTitle className="text-xl mb-2">Session Error</CardTitle>
-            <CardDescription>Could not establish a user session for the room. Please try again or return to the home page.</CardDescription>
+            <CardDescription>Could not establish a user session for the room. Please try refreshing or return to the home page.</CardDescription>
             <Button onClick={() => router.push('/')} className="mt-6">Go to Home</Button>
         </Card>
       </MainLayout>
@@ -649,11 +682,13 @@ export default function RoomPage() {
             })}
           </div>
         ) : (
-          <Card className="p-8 text-center">
-            <Users className="w-16 h-16 mx-auto text-primary mb-4" />
-            <CardTitle className="text-xl">Ready to join?</CardTitle>
-            <CardDescription>Click "Join Conference" above to start your video and connect with others.</CardDescription>
-          </Card>
+          !isLoading && sessionUser && ( // Only show "Ready to join" if not loading and sessionUser exists
+            <Card className="p-8 text-center">
+                <Users className="w-16 h-16 mx-auto text-primary mb-4" />
+                <CardTitle className="text-xl">Ready to join?</CardTitle>
+                <CardDescription>Click "Join Conference" above to start your video and connect with others.</CardDescription>
+            </Card>
+           )
         )}
         
         <div className="w-full max-w-2xl mt-8 mx-auto">
@@ -679,3 +714,4 @@ export default function RoomPage() {
   );
 }
 
+    
