@@ -110,6 +110,7 @@ export default function HomePage() {
         id: authCurrentUser.uid,
         name: authUserProfile.name,
         photoUrl: authUserProfile.photoUrl,
+        dataAiHint: authUserProfile.dataAiHint,
         countryCode: authUserProfile.countryCode,
         isGoogleUser: true,
       };
@@ -733,7 +734,10 @@ export default function HomePage() {
   useEffect(() => {
     const handleVisibilityChange = () => {
       const currentSUser = sessionUser; // Capture current sessionUser
-      if (!currentSUser || !currentSUser.id) return;
+      if (!currentSUser || !currentSUser.id) {
+         addDebugLog("Page Visibility: No currentSUser or currentSUser.id, cannot handle visibility change.");
+         return;
+      }
 
       const userOnlinePath = `onlineUsers/${currentSUser.id}`;
 
@@ -752,12 +756,17 @@ export default function HomePage() {
         // Re-establish onDisconnect for the specific user type
         if (currentSUser.isGoogleUser && authCurrentUser) {
           // Authenticated user onDisconnect is handled by useAuth
+          addDebugLog(`Page Visibility: Google user ${currentSUser.id} now visible. onDisconnect handled by useAuth.`);
         } else if (!currentSUser.isGoogleUser && anonymousSessionId === currentSUser.id) {
           // Anonymous user, re-set onDisconnect
           const userStatusDbRef = ref(db, userOnlinePath);
-          userStatusDbRef.onDisconnect().remove()
-            .then(() => addDebugLog(`Anonymous Presence: onDisconnect().remove() re-set for ${currentSUser.id} on page visible.`))
-            .catch(e => addDebugLog(`Anonymous Presence: ERROR re-setting onDisconnect for ${currentSUser.id}: ${e.message || e}`));
+          if (userStatusDbRef && typeof userStatusDbRef.onDisconnect === 'function') {
+            userStatusDbRef.onDisconnect().remove()
+              .then(() => addDebugLog(`Anonymous Presence: onDisconnect().remove() re-set for ${currentSUser.id} on page visible.`))
+              .catch(e => addDebugLog(`Anonymous Presence: ERROR re-setting onDisconnect for ${currentSUser.id}: ${e.message || e}`));
+          } else {
+            addDebugLog(`Anonymous Presence: ERROR - userStatusDbRef or onDisconnect not valid for re-set on page visible for ${currentSUser.id}. Path: ${userStatusDbRef?.toString()}`);
+          }
         }
       }
     };
@@ -935,7 +944,7 @@ export default function HomePage() {
                     isOpen={isProfileEditDialogOpen}
                     onOpenChange={setIsProfileEditDialogOpen}
                     user={{
-                        uid: authCurrentUser.uid, // useAuth hook provides FirebaseUser type
+                        id: authCurrentUser.uid, // useAuth hook provides FirebaseUser type
                         displayName: authCurrentUser.displayName || '',
                         email: authCurrentUser.email || '',
                         photoUrl: authCurrentUser.photoURL || undefined
@@ -1063,3 +1072,5 @@ export default function HomePage() {
     </MainLayout>
   );
 }
+
+    
