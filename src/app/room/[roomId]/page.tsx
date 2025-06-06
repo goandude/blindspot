@@ -22,11 +22,10 @@ const servers = {
   ],
 };
 
-interface RemoteStreamWithUser extends MediaStream {
-  userId?: string;
-  userName?: string;
-  userPhotoUrl?: string;
-  dataAiHint?: string;
+// Interface for the new remoteStreams state structure
+interface RemoteStreamEntry {
+  stream: MediaStream;
+  userInfo?: OnlineUser;
 }
 
 export default function RoomPage() {
@@ -39,7 +38,7 @@ export default function RoomPage() {
   const [sessionUser, setSessionUser] = useState<OnlineUser | null>(null);
 
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
-  const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStreamWithUser>>(new Map());
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStreamEntry>>(new Map());
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const [participants, setParticipants] = useState<OnlineUser[]>([]);
   const participantsRef = useRef(participants); 
@@ -158,7 +157,7 @@ export default function RoomPage() {
       addDebugLog("Local stream stopped.");
     }
 
-    peerConnectionsRef.current.forEach((pc, peerId) => {
+    peerConnectionsRef.current.forEach((_, peerId) => { // Changed pc to _
       addDebugLog(`Cleaning up PC for ${peerId} during leave room.`);
       cleanupPeerConnection(peerId);
     });
@@ -222,22 +221,36 @@ export default function RoomPage() {
       addDebugLog(`Remote track received from ${peerId}: Kind: ${event.track.kind}. Stream(s): ${event.streams.length}`);
       setRemoteStreams(prevRemoteStreams => {
         const newRemoteStreams = new Map(prevRemoteStreams);
-        let stream = newRemoteStreams.get(peerId) as RemoteStreamWithUser | undefined;
-        if (!stream) {
-            stream = new MediaStream() as RemoteStreamWithUser;
-            stream.userId = peerId;
-            const participantData = participantsRef.current.find(p => p.id === peerId);
-            stream.userName = participantData?.name || peerId;
-            stream.userPhotoUrl = participantData?.photoUrl;
-            stream.dataAiHint = participantData?.dataAiHint;
+        let entry = newRemoteStreams.get(peerId);
+        const currentParticipantData = participantsRef.current.find(p => p.id === peerId);
+
+        if (!entry) {
+          const newStream = new MediaStream();
+          entry = { stream: newStream, userInfo: currentParticipantData };
+          newRemoteStreams.set(peerId, entry);
+          addDebugLog(`Created new stream entry for ${peerId}`);
         }
+        
         event.streams[0].getTracks().forEach(track => {
-            if (!stream!.getTrackById(track.id)) { 
-                stream!.addTrack(track);
-            }
+          if (!entry!.stream.getTrackById(track.id)) { 
+              entry!.stream.addTrack(track);
+              addDebugLog(`Added track ${track.kind} to stream for ${peerId}`);
+          }
         });
-        newRemoteStreams.set(peerId, stream);
-        addDebugLog(`Updated remote stream for ${peerId}. Total tracks: ${stream.getTracks().length}`);
+
+        // Update userInfo if it has changed or needs to be set
+        if (currentParticipantData && (!entry.userInfo || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl)) {
+            entry.userInfo = currentParticipantData;
+            // Ensure a new object reference for the entry to trigger React update for VideoFeed
+            newRemoteStreams.set(peerId, { ...entry, userInfo: currentParticipantData });
+            addDebugLog(`Updated userInfo for ${peerId}`);
+        } else if (!currentParticipantData && entry.userInfo) {
+            entry.userInfo = undefined;
+            newRemoteStreams.set(peerId, { ...entry, userInfo: undefined });
+            addDebugLog(`Cleared userInfo for ${peerId} as participant data not found`);
+        }
+        
+        addDebugLog(`Updated remote stream for ${peerId}. Total tracks in stream: ${entry.stream.getTracks().length}`);
         return newRemoteStreams;
       });
     };
@@ -294,65 +307,78 @@ export default function RoomPage() {
 
         if (type === 'offer') {
           if (pc && pc.signalingState !== 'closed') {
-            addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists and is not closed. Current state: ${pc.signalingState}. Potentially re-negotiating or cleaning up old one.`);
+            addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists and is not closed. State: ${pc.signalingState}. Cleaning up old one.`);
+            cleanupPeerConnection(senderId); // Clean up old before creating new
           }
-          if(!pc || pc.signalingState === 'closed') {
-            pc = new RTCPeerConnection(servers);
-            peerConnectionsRef.current.set(senderId, pc);
-            addDebugLog(`Created new PC for offer from ${senderId}`);
+          
+          pc = new RTCPeerConnection(servers);
+          peerConnectionsRef.current.set(senderId, pc);
+          addDebugLog(`Created new PC for offer from ${senderId}`);
 
-            localStream.getTracks().forEach(track => {
-                try { pc!.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} to PC for ${senderId} (on offer)`);}
-                catch (e:any) { addDebugLog(`Error adding local track on offer from ${senderId}: ${e.message}`); }
-            });
+          localStream.getTracks().forEach(track => {
+              try { pc!.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} to PC for ${senderId} (on offer)`);}
+              catch (e:any) { addDebugLog(`Error adding local track on offer from ${senderId}: ${e.message}`); }
+          });
 
-            pc.onicecandidate = event => {
-                if (event.candidate && roomId && sessionUser?.id) {
-                addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`);
-                const candidatePayload: RoomSignal = {
-                    type: 'candidate',
-                    senderId: sessionUser.id,
-                    senderName: sessionUser.name,
-                    data: event.candidate.toJSON(),
-                };
-                const candidateRef = push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`));
-                set(candidateRef, candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`));
+          pc.onicecandidate = event => {
+              if (event.candidate && roomId && sessionUser?.id) {
+              addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`);
+              const candidatePayload: RoomSignal = {
+                  type: 'candidate',
+                  senderId: sessionUser.id,
+                  senderName: sessionUser.name,
+                  data: event.candidate.toJSON(),
+              };
+              const candidateRef = push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`));
+              set(candidateRef, candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`));
+              }
+          };
+
+          pc.ontrack = event => {
+              addDebugLog(`Remote track received from ${senderId} (on offer path): Kind: ${event.track.kind}`);
+              setRemoteStreams(prevRemoteStreams => {
+                const newRemoteStreams = new Map(prevRemoteStreams);
+                let entry = newRemoteStreams.get(senderId);
+                const currentParticipantData = participantsRef.current.find(p => p.id === senderId);
+
+                if (!entry) {
+                  const newStream = new MediaStream();
+                  entry = { stream: newStream, userInfo: currentParticipantData };
+                  newRemoteStreams.set(senderId, entry);
+                  addDebugLog(`Created new stream entry for ${senderId} via offer path`);
                 }
-            };
-
-            pc.ontrack = event => {
-                addDebugLog(`Remote track received from ${senderId} (on offer path): Kind: ${event.track.kind}`);
-                setRemoteStreams(prevRemoteStreams => {
-                    const newRemoteStreams = new Map(prevRemoteStreams);
-                    let stream = newRemoteStreams.get(senderId) as RemoteStreamWithUser | undefined;
-                     if (!stream) {
-                        stream = new MediaStream() as RemoteStreamWithUser;
-                        stream.userId = senderId;
-                        const participantData = participantsRef.current.find(p => p.id === senderId);
-                        stream.userName = participantData?.name || senderId;
-                        stream.userPhotoUrl = participantData?.photoUrl;
-                        stream.dataAiHint = participantData?.dataAiHint;
+                
+                event.streams[0].getTracks().forEach(track => {
+                    if(!entry!.stream.getTrackById(track.id)) {
+                      entry!.stream.addTrack(track);
+                      addDebugLog(`Added track ${track.kind} to stream for ${senderId} via offer path`);
                     }
-                    event.streams[0].getTracks().forEach(track => {
-                        if(!stream!.getTrackById(track.id)) stream!.addTrack(track);
-                    });
-                    newRemoteStreams.set(senderId, stream);
-                    addDebugLog(`Updated remote stream for ${senderId} (on offer path). Total tracks: ${stream.getTracks().length}`);
-                    return newRemoteStreams;
                 });
-            };
-            
-            pc.oniceconnectionstatechange = () => {
-                addDebugLog(`ICE state for ${senderId} (on offer path): ${pc!.iceConnectionState}`);
-                if (['failed', 'disconnected', 'closed'].includes(pc!.iceConnectionState)) {
-                addDebugLog(`ICE connection to ${senderId} ${pc!.iceConnectionState} (on offer path). Cleaning up.`);
-                cleanupPeerConnection(senderId);
+                
+                if (currentParticipantData && (!entry.userInfo || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl)) {
+                    entry.userInfo = currentParticipantData;
+                    newRemoteStreams.set(senderId, { ...entry, userInfo: currentParticipantData });
+                     addDebugLog(`Updated userInfo for ${senderId} via offer path`);
+                } else if (!currentParticipantData && entry.userInfo) {
+                    entry.userInfo = undefined;
+                    newRemoteStreams.set(senderId, { ...entry, userInfo: undefined });
+                    addDebugLog(`Cleared userInfo for ${senderId} via offer path`);
                 }
-            };
-             pc.onsignalingstatechange = () => addDebugLog(`Signaling state for ${senderId} (on offer path): ${pc!.signalingState}`);
-          }
 
-
+                addDebugLog(`Updated remote stream for ${senderId} (on offer path). Total tracks: ${entry.stream.getTracks().length}`);
+                return newRemoteStreams;
+              });
+          };
+          
+          pc.oniceconnectionstatechange = () => {
+              addDebugLog(`ICE state for ${senderId} (on offer path): ${pc!.iceConnectionState}`);
+              if (['failed', 'disconnected', 'closed'].includes(pc!.iceConnectionState)) {
+              addDebugLog(`ICE connection to ${senderId} ${pc!.iceConnectionState} (on offer path). Cleaning up.`);
+              cleanupPeerConnection(senderId);
+              }
+          };
+           pc.onsignalingstatechange = () => addDebugLog(`Signaling state for ${senderId} (on offer path): ${pc!.signalingState}`);
+          
           pc!.setRemoteDescription(new RTCSessionDescription(data as RTCSessionDescriptionInit))
             .then(() => { 
                 addDebugLog(`Remote desc (offer) from ${senderId} set.`);
@@ -416,10 +442,10 @@ export default function RoomPage() {
         }
       });
       
-      peerConnectionsRef.current.forEach((pc, peerId) => {
-        if (!newParticipantsList.find(p => p.id === peerId)) {
-          addDebugLog(`Participant ${peerId} left. Cleaning up their connection.`);
-          cleanupPeerConnection(peerId);
+      peerConnectionsRef.current.forEach((_, pcPeerId) => { // Renamed pc to _ and peerId to pcPeerId
+        if (!newParticipantsList.find(p => p.id === pcPeerId)) {
+          addDebugLog(`Participant ${pcPeerId} left. Cleaning up their connection.`);
+          cleanupPeerConnection(pcPeerId);
         }
       });
     };
@@ -505,7 +531,12 @@ export default function RoomPage() {
       .catch(err => toast({ title: "Copy Failed", description: "Could not copy link.", variant: "destructive" }));
   };
   
-  const VideoFeed = ({ stream, user, isLocal }: { stream: MediaStream, user?: OnlineUser | RemoteStreamWithUser | {name?: string, photoUrl?: string, dataAiHint?: string, id?: string }, isLocal?: boolean}) => {
+  const VideoFeed = ({ stream, user, isLocal, isVideoActuallyOn }: { 
+    stream: MediaStream, 
+    user?: OnlineUser | null,
+    isLocal?: boolean,
+    isVideoActuallyOn: boolean 
+  }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     
     useEffect(() => {
@@ -520,36 +551,22 @@ export default function RoomPage() {
           <AvatarFallback>{user?.name ? user.name.charAt(0).toUpperCase() : <Users />}</AvatarFallback>
       </Avatar>
     );
-
-    let showVideo = true;
-    if (isLocal) {
-        showVideo = isVideoOn;
-    } else if (stream) {
-        const videoTracks = stream.getVideoTracks();
-        if (videoTracks.length > 0) {
-            showVideo = videoTracks.some(track => track.enabled && !track.muted);
-        } else {
-            showVideo = false; 
-        }
-    } else {
-        showVideo = false; 
-    }
     
     return (
       <Card className="overflow-hidden shadow-lg relative aspect-video flex flex-col justify-between bg-muted">
-        <video ref={videoRef} autoPlay playsInline muted={isLocal} className="w-full h-full object-cover absolute inset-0" style={{ display: showVideo ? 'block' : 'none' }} />
+        <video ref={videoRef} autoPlay playsInline muted={isLocal} className="w-full h-full object-cover absolute inset-0" style={{ display: isVideoActuallyOn ? 'block' : 'none' }} />
         
-        {!showVideo && (
+        {!isVideoActuallyOn && (
            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-white p-2">
              <FallbackAvatar />
-             <p className="mt-2 text-sm truncate">{user?.name || (user as OnlineUser)?.id || 'User'}</p>
+             <p className="mt-2 text-sm truncate">{user?.name || user?.id || 'User'}</p>
              <p className="text-xs">
                 {isLocal ? "Your video is off" : "Video off"}
              </p>
            </div>
         )}
         <CardFooter className="p-2 bg-gradient-to-t from-black/50 to-transparent text-xs text-white z-10 mt-auto">
-          <p className="truncate">{isLocal ? `${sessionUser?.name || 'You'} (You)` : user?.name || (user as OnlineUser)?.id || 'Remote User'}</p>
+          <p className="truncate">{isLocal ? `${sessionUser?.name || 'You'} (You)` : user?.name || user?.id || 'Remote User'}</p>
         </CardFooter>
       </Card>
     );
@@ -623,10 +640,12 @@ export default function RoomPage() {
         {isInRoom ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {localStream && sessionUser && (
-              <VideoFeed stream={localStream} user={sessionUser} isLocal />
+              <VideoFeed stream={localStream} user={sessionUser} isLocal isVideoActuallyOn={isVideoOn} />
             )}
-            {Array.from(remoteStreams.entries()).map(([peerId, streamData]) => {
-                return <VideoFeed key={peerId} stream={streamData} user={streamData} />;
+            {Array.from(remoteStreams.entries()).map(([peerId, { stream, userInfo }]) => {
+                const remoteVideoTracks = stream.getVideoTracks();
+                const isRemoteVideoActuallyOn = remoteVideoTracks.length > 0 && remoteVideoTracks.some(track => track.enabled && !track.muted);
+                return <VideoFeed key={peerId} stream={stream} user={userInfo} isLocal={false} isVideoActuallyOn={isRemoteVideoActuallyOn} />;
             })}
           </div>
         ) : (
