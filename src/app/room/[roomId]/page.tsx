@@ -42,7 +42,8 @@ export default function RoomPage() {
   const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStreamWithUser>>(new Map());
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
   const [participants, setParticipants] = useState<OnlineUser[]>([]);
-  
+  const participantsRef = useRef(participants); // Ref to hold current participants
+
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [isInRoom, setIsInRoom] = useState(false);
@@ -51,16 +52,18 @@ export default function RoomPage() {
 
   const firebaseListeners = useRef<Map<string, { ref: DatabaseReference, callback: (snapshot: any) => void }>>(new Map());
 
+  useEffect(() => {
+    participantsRef.current = participants;
+  }, [participants]);
+
   const addDebugLog = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
     const currentSId = sessionUser?.id || 'N/A';
     const prefix = `[${currentSId.substring(0, 4)}] [Room ${roomId?.substring(0,4) || 'N/A'}] `;
     const logEntry = `[${timestamp}] ${prefix}${message}`;
     setDebugLogs(prevLogs => [logEntry, ...prevLogs].slice(0, 100));
-    // console.log(logEntry); // Optional: also log to browser console
   }, [sessionUser, roomId]);
 
-  // Effect to establish sessionUser (either from auth or generate anonymous)
   useEffect(() => {
     if (authLoading) {
       addDebugLog("Auth still loading, waiting...");
@@ -139,18 +142,8 @@ export default function RoomPage() {
       const participantRef = ref(db, `conferenceRooms/${roomId}/participants/${sessionUser.id}`);
       remove(participantRef).catch(e => addDebugLog(`Error removing self from participants: ${e.message}`));
       
-      // Clean up signals directed TO this user
       const mySignalsRef = ref(db, `conferenceRooms/${roomId}/signals/${sessionUser.id}`);
       remove(mySignalsRef).catch(e => addDebugLog(`Error removing my signals folder: ${e.message}`));
-
-      // Iterate over current participants to remove signals sent BY this user TO them
-      participants.forEach(p => {
-        if (p.id !== sessionUser.id) {
-          // This is a bit broad, ideally signals would have unique IDs to remove.
-          // For simplicity, we're not implementing fine-grained signal removal by sender for now.
-          // A more robust solution might involve a cloud function for cleanup or TTL on signals.
-        }
-      });
     }
     
     firebaseListeners.current.forEach(({ ref: fRef, callback }) => off(fRef, 'value', callback));
@@ -159,7 +152,7 @@ export default function RoomPage() {
     setParticipants([]);
     toast({ title: "Left Room", description: "You have left the conference room." });
     router.push('/');
-  }, [roomId, sessionUser, localStream, cleanupPeerConnection, addDebugLog, toast, router, participants]);
+  }, [roomId, sessionUser, localStream, cleanupPeerConnection, addDebugLog, toast, router]);
 
 
   const initializeAndSendOffer = useCallback(async (peerId: string, peerName?: string) => {
@@ -193,20 +186,28 @@ export default function RoomPage() {
 
     pc.ontrack = event => {
       addDebugLog(`Remote track received from ${peerId}: Kind: ${event.track.kind}`);
-      const existingStream = remoteStreams.get(peerId) || new MediaStream();
-      event.streams[0].getTracks().forEach(track => existingStream.addTrack(track));
       
-      const streamWithUser = existingStream as RemoteStreamWithUser;
-      streamWithUser.userId = peerId;
-      const participantData = participants.find(p => p.id === peerId);
-      streamWithUser.userName = participantData?.name || peerId;
-      streamWithUser.userPhotoUrl = participantData?.photoUrl;
-      streamWithUser.dataAiHint = participantData?.dataAiHint;
-
-      setRemoteStreams(prev => new Map(prev).set(peerId, streamWithUser));
+      setRemoteStreams(prevRemoteStreams => {
+        const newRemoteStreams = new Map(prevRemoteStreams);
+        const existingStream = newRemoteStreams.get(peerId) || new MediaStream();
+        event.streams[0].getTracks().forEach(track => existingStream.addTrack(track));
+        
+        const streamWithUser = existingStream as RemoteStreamWithUser;
+        streamWithUser.userId = peerId;
+        const currentParticipants = participantsRef.current; // Use ref here
+        const participantData = currentParticipants.find(p => p.id === peerId);
+        streamWithUser.userName = participantData?.name || peerId;
+        streamWithUser.userPhotoUrl = participantData?.photoUrl;
+        streamWithUser.dataAiHint = participantData?.dataAiHint;
+        
+        newRemoteStreams.set(peerId, streamWithUser);
+        return newRemoteStreams;
+      });
     };
     
     pc.oniceconnectionstatechange = () => {
+      // To reduce log spam, you could add more sophisticated logging here
+      // e.g., only log if state *changes* or on critical states like 'failed'
       addDebugLog(`ICE state for ${peerId}: ${pc.iceConnectionState}`);
       if (['failed', 'disconnected', 'closed'].includes(pc.iceConnectionState)) {
          addDebugLog(`ICE connection to ${peerId} failed/disconnected. Cleaning up.`);
@@ -230,15 +231,13 @@ export default function RoomPage() {
       addDebugLog(`Error creating/sending offer to ${peerId}: ${error.message}`);
       cleanupPeerConnection(peerId);
     }
-  }, [localStream, roomId, sessionUser, addDebugLog, remoteStreams, participants, cleanupPeerConnection]);
+  }, [localStream, roomId, sessionUser, addDebugLog, cleanupPeerConnection]); // Removed participants and remoteStreams
 
-  // Main effect for joining room, setting up listeners
   useEffect(() => {
     if (!isInRoom || !roomId || !sessionUser?.id || !localStream) return;
 
     addDebugLog(`Setting up Firebase listeners for room ${roomId}, user ${sessionUser.id}`);
 
-    // 1. Listen for signals addressed to current user
     const mySignalsRefPath = `conferenceRooms/${roomId}/signals/${sessionUser.id}`;
     const mySignalsRef = ref(db, mySignalsRefPath);
     const signalsCallback = (snapshot: any) => {
@@ -248,15 +247,15 @@ export default function RoomPage() {
         const signalKey = childSnapshot.key;
         const { senderId, senderName, type, data } = signal;
 
-        if (!senderId || senderId === sessionUser.id) return; // Ignore signals from self or invalid
+        if (!senderId || senderId === sessionUser.id) return; 
 
         addDebugLog(`Received signal type '${type}' from ${senderId} (${senderName || 'Unknown'})`);
         let pc = peerConnectionsRef.current.get(senderId);
 
         if (type === 'offer') {
           if (pc) {
-            addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists. Possible race or old offer.`);
-            // Potentially close existing and create new, or ignore if signalingState is stable
+            addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists. Cleaning old one.`);
+            cleanupPeerConnection(senderId);
           }
           pc = new RTCPeerConnection(servers);
           peerConnectionsRef.current.set(senderId, pc);
@@ -281,17 +280,22 @@ export default function RoomPage() {
 
           pc.ontrack = event => {
             addDebugLog(`Remote track received from ${senderId} (on offer): Kind: ${event.track.kind}`);
-            const existingStream = remoteStreams.get(senderId) || new MediaStream();
-            event.streams[0].getTracks().forEach(track => existingStream.addTrack(track));
-            
-            const streamWithUser = existingStream as RemoteStreamWithUser;
-            streamWithUser.userId = senderId;
-            const participantData = participants.find(p => p.id === senderId);
-            streamWithUser.userName = participantData?.name || senderId;
-            streamWithUser.userPhotoUrl = participantData?.photoUrl;
-            streamWithUser.dataAiHint = participantData?.dataAiHint;
+             setRemoteStreams(prevRemoteStreams => {
+                const newRemoteStreams = new Map(prevRemoteStreams);
+                const existingStream = newRemoteStreams.get(senderId) || new MediaStream();
+                event.streams[0].getTracks().forEach(track => existingStream.addTrack(track));
+                
+                const streamWithUser = existingStream as RemoteStreamWithUser;
+                streamWithUser.userId = senderId;
+                const currentParticipants = participantsRef.current; // Use ref
+                const participantData = currentParticipants.find(p => p.id === senderId);
+                streamWithUser.userName = participantData?.name || senderId;
+                streamWithUser.userPhotoUrl = participantData?.photoUrl;
+                streamWithUser.dataAiHint = participantData?.dataAiHint;
 
-            setRemoteStreams(prev => new Map(prev).set(senderId, streamWithUser));
+                newRemoteStreams.set(senderId, streamWithUser);
+                return newRemoteStreams;
+            });
           };
           
           pc.oniceconnectionstatechange = () => {
@@ -326,36 +330,36 @@ export default function RoomPage() {
             .then(() => addDebugLog(`Remote description (answer) set from ${senderId}`))
             .catch(e => addDebugLog(`Error setting remote desc (answer) from ${senderId}: ${e.message}`));
         } else if (type === 'candidate' && pc) {
-          pc.addIceCandidate(new RTCIceCandidate(data as RTCIceCandidateInit))
-            .catch(e => addDebugLog(`Error adding ICE candidate from ${senderId}: ${e.message}`));
+           if (pc.remoteDescription) { // Only add candidate if remote description is set
+            pc.addIceCandidate(new RTCIceCandidate(data as RTCIceCandidateInit))
+              .catch(e => addDebugLog(`Error adding ICE candidate from ${senderId}: ${e.message}`));
+           } else {
+             addDebugLog(`WARN: Received ICE candidate from ${senderId} but remote description not yet set. Candidate might be ignored or queued by browser.`);
+           }
         }
-        // Remove processed signal
         if (signalKey) remove(child(mySignalsRef, signalKey)).catch(e => addDebugLog(`Failed to remove processed signal ${signalKey}: ${e.message}`));
       });
     };
     onValue(mySignalsRef, signalsCallback);
     firebaseListeners.current.set(mySignalsRefPath, { ref: mySignalsRef, callback: signalsCallback });
 
-    // 2. Listen for participants joining/leaving
     const participantsRefPath = `conferenceRooms/${roomId}/participants`;
-    const participantsRef = ref(db, participantsRefPath);
+    const participantsDbRef = ref(db, participantsRefPath); // Renamed to avoid conflict with participantsRef (useRef)
     const participantsCallback = (snapshot: any) => {
       const newParticipantsList: OnlineUser[] = [];
       snapshot.forEach((childSnapshot: any) => {
         newParticipantsList.push({ id: childSnapshot.key, ...childSnapshot.val() } as OnlineUser);
       });
-      setParticipants(newParticipantsList);
-      addDebugLog(`Participants updated: ${newParticipantsList.map(p => p.name).join(', ')}`);
+      setParticipants(newParticipantsList); // This updates participantsRef.current via its own useEffect
+      addDebugLog(`Participants updated: ${newParticipantsList.map(p => p.name).join(', ')} (${newParticipantsList.length} total)`);
 
       newParticipantsList.forEach(p => {
         if (p.id !== sessionUser.id && !peerConnectionsRef.current.has(p.id) && localStream) {
-           // New participant joined who is not self and not already connected
            addDebugLog(`New participant ${p.name} (${p.id}) detected. Initializing connection.`);
            initializeAndSendOffer(p.id, p.name);
         }
       });
       
-      // Check for participants who left
       peerConnectionsRef.current.forEach((pc, peerId) => {
         if (!newParticipantsList.find(p => p.id === peerId)) {
           addDebugLog(`Participant ${peerId} left. Cleaning up their connection.`);
@@ -363,8 +367,8 @@ export default function RoomPage() {
         }
       });
     };
-    onValue(participantsRef, participantsCallback);
-    firebaseListeners.current.set(participantsRefPath, { ref: participantsRef, callback: participantsCallback });
+    onValue(participantsDbRef, participantsCallback);
+    firebaseListeners.current.set(participantsRefPath, { ref: participantsDbRef, callback: participantsCallback });
 
     return () => {
       addDebugLog(`Cleaning up Firebase listeners for room ${roomId}, user ${sessionUser.id}`);
@@ -374,8 +378,7 @@ export default function RoomPage() {
       });
       firebaseListeners.current.clear();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isInRoom, roomId, sessionUser, localStream, initializeAndSendOffer, cleanupPeerConnection, addDebugLog]); // participants removed to avoid loop with initializeAndSendOffer
+  }, [isInRoom, roomId, sessionUser, localStream, initializeAndSendOffer, cleanupPeerConnection, addDebugLog]);
 
   const handleJoinRoom = async () => {
     if (!sessionUser || !roomId) {
@@ -389,10 +392,11 @@ export default function RoomPage() {
       setIsMicOn(true);
       setIsVideoOn(true);
 
-      const participantRef = ref(db, `conferenceRooms/${roomId}/participants/${sessionUser.id}`);
+      const participantRefPath = `conferenceRooms/${roomId}/participants/${sessionUser.id}`;
+      const participantDbRef = ref(db, participantRefPath);
       const participantData: OnlineUser = { ...sessionUser, timestamp: serverTimestamp() };
-      await set(participantRef, participantData);
-      participantRef.onDisconnect().remove(); // Set onDisconnect for self
+      await set(participantDbRef, participantData);
+      participantDbRef.onDisconnect().remove(); 
       
       setIsInRoom(true);
       toast({ title: "Joined Room!", description: `You are now in room ${roomId}.` });
@@ -447,31 +451,34 @@ export default function RoomPage() {
       </Avatar>
     );
 
+    let isRemoteVideoActuallyOn = false;
+    if (!isLocal && stream) {
+        const videoTracks = stream.getVideoTracks();
+        if (videoTracks.length > 0) {
+            isRemoteVideoActuallyOn = videoTracks.some(track => track.enabled && !track.muted);
+        }
+    }
+    
+    const showLocalVideoPlaceholder = isLocal && !isVideoOn;
+    const showRemoteVideoPlaceholder = !isLocal && (!stream || !isRemoteVideoActuallyOn);
+
+
     return (
       <Card className="overflow-hidden shadow-lg relative aspect-video flex flex-col justify-between bg-muted">
-        <video ref={videoRef} autoPlay playsInline muted={isLocal} className="w-full h-full object-cover absolute inset-0" />
-        {isLocal && !isVideoOn && (
-           <div className="absolute inset-0 flex items-center justify-center bg-black/70">
-             <VideoOff className="w-1/3 h-1/3 text-white" />
+        <video ref={videoRef} autoPlay playsInline muted={isLocal} className="w-full h-full object-cover absolute inset-0" style={{ display: (showLocalVideoPlaceholder || showRemoteVideoPlaceholder) ? 'none' : 'block' }} />
+        
+        {(showLocalVideoPlaceholder || showRemoteVideoPlaceholder) && (
+           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-white p-2">
+             <FallbackAvatar />
+             <p className="mt-2 text-sm truncate">{user?.name || user?.id || 'User'}</p>
+             <p className="text-xs">
+                {isLocal && !isVideoOn && "Your video is off"}
+                {!isLocal && (!stream || !isRemoteVideoActuallyOn) && "Video off"}
+             </p>
            </div>
-        )}
-        {!isLocal && !stream.getVideoTracks().find(t=>t.enabled) && ( // Heuristic for remote video off
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-white p-2">
-                <FallbackAvatar />
-                <p className="mt-2 text-sm truncate">{user?.name || user?.id || 'User'}</p>
-                <p className="text-xs">Video Off</p>
-            </div>
-        )}
-         {!isLocal && stream.getVideoTracks().length === 0 && ( // No video track at all
-            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/70 text-white p-2">
-                <FallbackAvatar />
-                <p className="mt-2 text-sm truncate">{user?.name || user?.id || 'User'}</p>
-                <p className="text-xs">No Video</p>
-            </div>
         )}
         <CardFooter className="p-2 bg-gradient-to-t from-black/50 to-transparent text-xs text-white z-10 mt-auto">
           <p className="truncate">{isLocal ? `${sessionUser?.name || 'You'} (You)` : user?.name || user?.id || 'Remote User'}</p>
-          {/* Add mic status icon here if available */}
         </CardFooter>
       </Card>
     );
@@ -548,10 +555,9 @@ export default function RoomPage() {
               <VideoFeed stream={localStream} user={sessionUser} isLocal />
             )}
             {Array.from(remoteStreams.entries()).map(([peerId, stream]) => {
-                const participantUser = participants.find(p => p.id === peerId) || { id: peerId, name: `User ${peerId.substring(0,4)}`};
+                const participantUser = participantsRef.current.find(p => p.id === peerId) || { id: peerId, name: `User ${peerId.substring(0,4)}`};
                 return <VideoFeed key={peerId} stream={stream} user={participantUser} />;
             })}
-             {/* Placeholders for empty slots up to a certain number for better grid appearance */}
             { Array.from({ length: Math.max(0, 1 - (Array.from(remoteStreams.keys()).length + (localStream ? 1: 0) )) }).map((_, i) => (
                 <Card key={`placeholder-${i}`} className="aspect-video flex items-center justify-center bg-muted/50 border-dashed border-muted-foreground/50">
                     <Users className="w-12 h-12 text-muted-foreground/50" />
@@ -566,7 +572,6 @@ export default function RoomPage() {
           </Card>
         )}
         
-        {/* Debug Log Panel (optional, can be removed for production) */}
         <div className="w-full max-w-2xl mt-8 mx-auto">
             <Card>
                 <CardHeader className="p-3">
@@ -589,3 +594,4 @@ export default function RoomPage() {
     </MainLayout>
   );
 }
+
