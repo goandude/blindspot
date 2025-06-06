@@ -1,12 +1,18 @@
 
+
 export interface UserProfile { // Stored in /users/{uid} for Google authenticated users
   id: string; // Firebase UID
   name: string;
   email?: string;
   photoUrl?: string; // From Google
-  countryCode?: string;
-  createdAt?: any;
-  lastLogin?: any;
+  countryCode?: string; // From ipapi.co or user input
+  birthdate?: string; // ISO string
+  sex?: "male" | "female" | "other" | "prefer_not_to_say";
+  sexualOrientation?: "straight" | "gay" | "lesbian" | "bisexual" | "pansexual" | "asexual" | "queer" | "questioning" | "other" | "prefer_not_to_say";
+  bio?: string;
+  dataAiHint?: string; // For Unsplash search keywords for placeholder images
+  createdAt?: any; // Firebase server timestamp
+  lastLogin?: any; // Firebase server timestamp
 }
 
 // User representation for online list and video calls
@@ -17,6 +23,7 @@ export interface OnlineUser {
   countryCode?: string;
   isGoogleUser?: boolean; // Flag to identify Google authenticated users
   timestamp?: any; // For Firebase server timestamp
+  dataAiHint?: string; // For Unsplash search keywords
 }
 
 
@@ -33,7 +40,7 @@ export interface RTCIceCandidateJSON {
 }
 
 export interface IncomingCallOffer {
-  roomId: string;
+  roomId: string; // This is the 1-to-1 call "room", not the conference room
   offer: RTCSessionDescriptionInit;
   callerId: string;
   callerName:string;
@@ -42,8 +49,16 @@ export interface IncomingCallOffer {
   callerIsGoogleUser?: boolean;
 }
 
-export interface CallAnswer {
+export interface CallAnswer { // For 1-to-1 calls
   answer: RTCSessionDescriptionInit;
   calleeId: string;
   calleeIsGoogleUser?: boolean;
+}
+
+// For multi-person conference rooms
+export interface RoomSignal {
+  type: 'offer' | 'answer' | 'candidate';
+  senderId: string;
+  senderName?: string; // Optional, for display/debug
+  data: RTCSessionDescriptionInit | RTCIceCandidateInit; // SDP for offer/answer, candidate object for ICE
 }

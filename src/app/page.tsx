@@ -8,17 +8,20 @@ import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { ProfileSetupDialog } from '@/components/features/profile/profile-setup-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
 import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile } from '@/types';
-import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff } from 'lucide-react';
+import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff, Link2, Users as UsersIcon } from 'lucide-react';
 import { db } from '@/lib/firebase';
 import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { OnlineUsersPanel } from '@/components/features/online-users/online-users-panel';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
-import { Card, CardHeader, CardContent, CardTitle, CardDescription } from '@/components/ui/card';
+import { Card, CardHeader, CardContent, CardTitle, CardDescription, CardFooter } from '@/components/ui/card';
 import { DebugLogPanel } from '@/components/features/debug/debug-log-panel';
 import { useAuth } from '@/hooks/use-auth';
 import { IncomingCallDialog } from '@/components/features/call/incoming-call-dialog';
+import { useRouter } from 'next/navigation';
+import { Input } from '@/components/ui/input';
+
 
 type ChatState = 'idle' | 'dialing' | 'connecting' | 'connected' | 'revealed';
 
@@ -46,9 +49,12 @@ export default function HomePage() {
   const [pageLoading, setPageLoading] = useState(true);
   const [isProfileEditDialogOpen, setIsProfileEditDialogOpen] = useState(false);
   const [incomingCallOfferDetails, setIncomingCallOfferDetails] = useState<IncomingCallOffer | null>(null);
-  const [isManuallyOnline, setIsManuallyOnline] = useState(true); 
+  const [isManuallyOnline, setIsManuallyOnline] = useState(true);
+  const [createdRoomId, setCreatedRoomId] = useState<string | null>(null);
+  const [roomLink, setRoomLink] = useState<string | null>(null);
 
   const { toast } = useToast();
+  const router = useRouter();
   const {
     currentUser: authCurrentUser,
     userProfile: authUserProfile,
@@ -61,7 +67,7 @@ export default function HomePage() {
   } = useAuth();
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  const roomIdRef = useRef<string | null>(null);
+  const roomIdRef = useRef<string | null>(null); // For 1-to-1 calls
   const peerIdRef = useRef<string | null>(null);
   const isCallerRef = useRef<boolean>(false);
   const ringingAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -164,7 +170,7 @@ export default function HomePage() {
   const stopRingingSound = useCallback(() => {
     if (ringingAudioRef.current) {
       ringingAudioRef.current.pause();
-      ringingAudioRef.current.currentTime = 0; 
+      ringingAudioRef.current.currentTime = 0;
       addDebugLog("Ringing sound stopped.");
     }
   }, [addDebugLog]);
@@ -337,9 +343,9 @@ export default function HomePage() {
       }
     };
     pc.onicecandidate = (event) => {
-      const currentRoom = roomIdRef.current;
+      const currentRoom = roomIdRef.current; // For 1-to-1 calls
       if (event.candidate && currentRoom && myId) {
-        addDebugLog(`Generated ICE candidate for room ${currentRoom}: ${event.candidate.candidate.substring(0,30)}...`);
+        addDebugLog(`Generated ICE candidate for 1-to-1 room ${currentRoom}: ${event.candidate.candidate.substring(0,30)}...`);
         const candidatesRefPath = `iceCandidates/${currentRoom}/${myId}`;
         push(ref(db, candidatesRefPath), event.candidate.toJSON())
           .catch(e => addDebugLog(`ERROR pushing ICE candidate to ${candidatesRefPath}: ${e.message || e}`));
@@ -419,16 +425,16 @@ export default function HomePage() {
     const pc = initializePeerConnection(stream);
     if (!pc) { addDebugLog("Failed to initialize peer connection."); toast({ title: "WebRTC Error", variant: "destructive" }); await handleEndCall(false); return; }
     peerConnectionRef.current = pc;
-    const newRoomId = push(child(ref(db), 'callRooms')).key;
-    if (!newRoomId) { addDebugLog("Could not create room ID."); toast({title: "Error", description: "Could not create room.", variant: "destructive"}); await handleEndCall(false); return; }
-    roomIdRef.current = newRoomId;
-    addDebugLog(`Assigned new room ID: ${newRoomId} for call between ${sUser.id} and ${targetUser.id}`);
+    const new1to1RoomId = push(child(ref(db), 'callRooms')).key; // Specific to 1-to-1
+    if (!new1to1RoomId) { addDebugLog("Could not create room ID."); toast({title: "Error", description: "Could not create room.", variant: "destructive"}); await handleEndCall(false); return; }
+    roomIdRef.current = new1to1RoomId; // Store 1-to-1 room ID
+    addDebugLog(`Assigned new 1-to-1 room ID: ${new1to1RoomId} for call between ${sUser.id} and ${targetUser.id}`);
     try {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      addDebugLog(`Offer created and local description set for room ${newRoomId}.`);
+      addDebugLog(`Offer created and local description set for 1-to-1 room ${new1to1RoomId}.`);
       const offerPayload: IncomingCallOffer = {
-        roomId: newRoomId, offer: pc.localDescription!.toJSON(),
+        roomId: new1to1RoomId, offer: pc.localDescription!.toJSON(),
         callerId: sUser.id, callerName: sUser.name, callerPhotoUrl: sUser.photoUrl,
         callerCountryCode: sUser.countryCode, callerIsGoogleUser: sUser.isGoogleUser || false,
       };
@@ -436,43 +442,43 @@ export default function HomePage() {
       await set(ref(db, offerPath), offerPayload);
       toast({ title: "Calling...", description: `Calling ${targetUser.name}...` });
       addDebugLog(`Offer sent to ${targetUser.id} at ${offerPath}.`);
-      const answerDbRefPath = `callSignals/${newRoomId}/answer`;
+      const answerDbRefPath = `callSignals/${new1to1RoomId}/answer`;
       addFirebaseListener(ref(db, answerDbRefPath), async (snapshot: any) => {
         if (snapshot.exists() && peerConnectionRef.current && peerConnectionRef.current.signalingState !== 'closed') {
           const answerData = snapshot.val() as CallAnswer;
-          addDebugLog(`Caller: Received answer from ${answerData.calleeId} for room ${newRoomId}.`);
+          addDebugLog(`Caller: Received answer from ${answerData.calleeId} for room ${new1to1RoomId}.`);
           if (peerConnectionRef.current.remoteDescription) {
-            addDebugLog(`WARN: Caller: Remote description already set for room ${newRoomId}.`);
+            addDebugLog(`WARN: Caller: Remote description already set for room ${new1to1RoomId}.`);
           }
           try {
             await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answerData.answer));
-            addDebugLog(`Caller: Remote desc (answer) set successfully for room ${newRoomId}.`);
+            addDebugLog(`Caller: Remote desc (answer) set successfully for room ${new1to1RoomId}.`);
           } catch (e: any) {
-            addDebugLog(`ERROR: Caller: setting remote desc (answer) for room ${newRoomId}: ${e.message || e}. PC State: ${peerConnectionRef.current.signalingState}`);
+            addDebugLog(`ERROR: Caller: setting remote desc (answer) for room ${new1to1RoomId}: ${e.message || e}. PC State: ${peerConnectionRef.current.signalingState}`);
             handleEndCall(false); return;
           }
           removeFirebaseListener(answerDbRefPath);
           remove(ref(db, answerDbRefPath)).catch(e => addDebugLog(`WARN: Error removing answer from ${answerDbRefPath}: ${e.message || e}`));
         } else if (snapshot.exists() && (!peerConnectionRef.current || peerConnectionRef.current.signalingState === 'closed')) {
-          addDebugLog(`Caller: Received answer for room ${newRoomId}, but peer connection is null or closed. Ignoring.`);
+          addDebugLog(`Caller: Received answer for room ${new1to1RoomId}, but peer connection is null or closed. Ignoring.`);
         }
       }, 'value');
-      const calleeIceCandidatesRefPath = `iceCandidates/${newRoomId}/${targetUser.id}`;
+      const calleeIceCandidatesRefPath = `iceCandidates/${new1to1RoomId}/${targetUser.id}`;
       addFirebaseListener(ref(db, calleeIceCandidatesRefPath), (snapshot: any) => {
         snapshot.forEach((childSnapshot: any) => {
           const candidate = childSnapshot.val();
           if (candidate && peerConnectionRef.current && peerConnectionRef.current.remoteDescription && peerConnectionRef.current.signalingState !== 'closed') {
-            addDebugLog(`Caller: Received ICE candidate object from callee ${targetUser.id} for room ${newRoomId}.`);
+            addDebugLog(`Caller: Received ICE candidate object from callee ${targetUser.id} for room ${new1to1RoomId}.`);
             if (candidate.candidate && (candidate.sdpMid !== null || candidate.sdpMLineIndex !== null)) {
               peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate))
-                .catch(e => addDebugLog(`ERROR: Caller adding callee ICE for room ${newRoomId}: ${e.message || e}`));
+                .catch(e => addDebugLog(`ERROR: Caller adding callee ICE for room ${new1to1RoomId}: ${e.message || e}`));
             } else if (candidate.candidate) {
               addDebugLog(`WARN: Caller: Received ICE with null sdpMid/sdpMLineIndex from callee ${targetUser.id}.`);
             }
           } else if (candidate && peerConnectionRef.current && !peerConnectionRef.current.remoteDescription) {
-            addDebugLog(`WARN: Caller received callee ICE for room ${newRoomId} but remote desc not set.`);
+            addDebugLog(`WARN: Caller received callee ICE for room ${new1to1RoomId} but remote desc not set.`);
           } else if (candidate && (!peerConnectionRef.current || peerConnectionRef.current.signalingState === 'closed')){
-            addDebugLog(`WARN: Caller received callee ICE for room ${newRoomId} but peer connection is null or closed.`);
+            addDebugLog(`WARN: Caller received callee ICE for room ${new1to1RoomId} but peer connection is null or closed.`);
           }
         });
       }, 'value');
@@ -492,7 +498,7 @@ export default function HomePage() {
     }
     addDebugLog(`Callee ${sUser.id}: Processing incoming offer from ${offerData.callerName} (${offerData.callerId}). Room: ${offerData.roomId}.`);
     wrappedSetChatState('connecting');
-    peerIdRef.current = offerData.callerId; roomIdRef.current = offerData.roomId; isCallerRef.current = false;
+    peerIdRef.current = offerData.callerId; roomIdRef.current = offerData.roomId; isCallerRef.current = false; // roomIdRef set for 1-to-1 call
     const peerForInfo: OnlineUser = {
       id: offerData.callerId, name: offerData.callerName, photoUrl: offerData.callerPhotoUrl,
       countryCode: offerData.callerCountryCode || 'XX', isGoogleUser: offerData.callerIsGoogleUser || false,
@@ -548,8 +554,8 @@ export default function HomePage() {
   const handleAcceptCall = useCallback(async () => {
     addDebugLog("Call accepted by user.");
     stopRingingSound();
-    const offerToProcess = incomingCallOfferDetailsRef.current; 
-    setIncomingCallOfferDetails(null); 
+    const offerToProcess = incomingCallOfferDetailsRef.current;
+    setIncomingCallOfferDetails(null);
     if (offerToProcess) {
       await processIncomingOfferAndAnswer(offerToProcess);
     } else {
@@ -560,8 +566,8 @@ export default function HomePage() {
   const handleDeclineCall = useCallback(async () => {
     addDebugLog("Call declined by user.");
     stopRingingSound();
-    const offerToDecline = incomingCallOfferDetailsRef.current; 
-    setIncomingCallOfferDetails(null); 
+    const offerToDecline = incomingCallOfferDetailsRef.current;
+    setIncomingCallOfferDetails(null);
 
     if (offerToDecline && sessionUser?.id) {
       const pendingOfferPath = `callSignals/${sessionUser.id}/pendingOffer`;
@@ -583,7 +589,7 @@ export default function HomePage() {
         addDebugLog(`Error managing pending offer after declining: ${e.message || e}`);
       }
     }
-    wrappedSetChatState('idle'); 
+    wrappedSetChatState('idle');
   }, [sessionUser, stopRingingSound, wrappedSetChatState, toast, addDebugLog]);
 
 
@@ -604,7 +610,7 @@ export default function HomePage() {
       set(ref(db, userOnlinePath), presenceData)
         .then(() => addDebugLog(`Set user ${sUser.id} online in DB.`))
         .catch(e => addDebugLog(`Error setting user ${sUser.id} online: ${e.message}`));
-      
+
       if (!sUser.isGoogleUser && anonymousSessionId === sUser.id) {
         const userStatusDbRef = ref(db, userOnlinePath);
         if (userStatusDbRef && typeof userStatusDbRef.onDisconnect === 'function') {
@@ -633,11 +639,11 @@ export default function HomePage() {
   };
 
   useEffect(() => {
-    if(sessionUser?.id){ 
+    if(sessionUser?.id){
         updateUserOnlineStatus(isManuallyOnline);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionUser, isManuallyOnline]); 
+  }, [sessionUser, isManuallyOnline]);
 
   useEffect(() => {
     if (authCurrentUser || !anonymousSessionId) {
@@ -650,7 +656,7 @@ export default function HomePage() {
     }
     const myId = anonymousSessionId;
     addDebugLog(`Anonymous Presence (connection): Setting up for ${myId}. Name: ${sessionUser.name}, Country: ${sessionUser.countryCode}`);
-    
+
     const connectedDbRef = ref(db, '.info/connected');
     const presenceCb = (snapshot: any) => {
       if (!currentSessionUserIdRef.current || currentSessionUserIdRef.current !== myId || authCurrentUser) {
@@ -659,8 +665,8 @@ export default function HomePage() {
       }
       if (snapshot.val() === true) {
         addDebugLog(`Anonymous Presence (connection): Firebase connection established for ${myId}.`);
-        if (isManuallyOnline && isPageVisibleRef.current) { 
-           updateUserOnlineStatus(true); 
+        if (isManuallyOnline && isPageVisibleRef.current) {
+           updateUserOnlineStatus(true);
         }
       } else {
         addDebugLog(`Anonymous Presence (connection): Firebase connection lost for ${myId}. onDisconnect should handle removal.`);
@@ -670,7 +676,7 @@ export default function HomePage() {
     return () => {
       addDebugLog(`Anonymous Presence (connection): Cleaning up for ${myId}. Detaching .info/connected listener.`);
       removeFirebaseListener(connectedDbRef.toString().substring(connectedDbRef.root.toString().length-1));
-      if (myId && isManuallyOnline) { 
+      if (myId && isManuallyOnline) {
         const pathToRemove = `onlineUsers/${myId}`;
         remove(ref(db, pathToRemove))
           .then(() => addDebugLog(`Anonymous Presence (connection): Explicitly removed user ${myId} on cleanup.`))
@@ -705,7 +711,7 @@ export default function HomePage() {
     const myId = currentSessionUserIdRef.current;
     if (!myId) {
       addDebugLog(`Incoming call listener: No active user ID (currentSessionUserIdRef is ${myId}).`);
-      if (incomingCallOfferDetailsRef.current) { 
+      if (incomingCallOfferDetailsRef.current) {
         setIncomingCallOfferDetails(null);
         stopRingingSound();
       }
@@ -734,7 +740,7 @@ export default function HomePage() {
         }
 
         if (chatStateRef.current === 'idle') {
-          if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) { 
+          if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
             addDebugLog(`Valid new/different offer by ${myId} from ${newOfferData.callerName}. Setting to state. New Room: ${newOfferData.roomId}`);
             setIncomingCallOfferDetails(newOfferData);
             playRingingSound();
@@ -744,19 +750,17 @@ export default function HomePage() {
           }
         } else { // User is not idle (e.g. in another call, dialing)
           addDebugLog(`WARN: ${myId} received offer from ${newOfferData.callerId} (room ${newOfferData.roomId}) while in state ${chatStateRef.current}. Removing this offer from DB as user is busy.`);
-          // Only remove if it's a different offer than one potentially being processed or if we are truly busy.
           if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
              remove(incomingCallDbRef).catch(e => addDebugLog(`WARN: Error removing offer (user busy) by ${myId} from DB: ${e.message || e}`));
           }
-          // If the current displayed offer (somehow, if logic allows) matches this new one while busy, clear it
-          if (currentDisplayedOffer?.roomId === newOfferData.roomId) { 
+          if (currentDisplayedOffer?.roomId === newOfferData.roomId) {
             setIncomingCallOfferDetails(null);
             stopRingingSound();
           }
         }
       } else { // newOfferData is null (offer removed from Firebase)
         addDebugLog(`Offer listener at ${incomingCallDbRefPath} received null data.`);
-        if (currentDisplayedOffer) { 
+        if (currentDisplayedOffer) {
           addDebugLog(`Pending offer (room ${currentDisplayedOffer.roomId}) removed for ${myId}. Clearing displayed offer & stopping ring.`);
           setIncomingCallOfferDetails(null);
           stopRingingSound();
@@ -768,13 +772,9 @@ export default function HomePage() {
     return () => {
       addDebugLog(`Cleaning up incoming call listener for path: ${incomingCallDbRefPath}`);
       removeFirebaseListener(incomingCallDbRefPath);
-      if(incomingCallOfferDetailsRef.current && incomingCallOfferDetailsRef.current.callerId === myId) {
-         // If the offer being cleared was one *I* made (which shouldn't be handled by *this* listener path),
-         // it implies complex state. Usually this listener is for offers *to* me.
-         // For safety, ensure ringing stops if any offer was displayed.
-      }
-      stopRingingSound(); // General stop on cleanup
+      stopRingingSound();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionUserIdRef.current, addFirebaseListener, removeFirebaseListener, addDebugLog, playRingingSound, stopRingingSound, toast, isManuallyOnline]);
 
   useEffect(() => {
@@ -784,12 +784,12 @@ export default function HomePage() {
         addDebugLog("Page Visibility: No currentSUser or currentSUser.id.");
         return;
       }
-      
+
       const userOnlinePath = `onlineUsers/${currentSUser.id}`;
       if (document.hidden) {
         addDebugLog(`Page hidden for ${currentSUser.id}. isManuallyOnline: ${isManuallyOnline}`);
         isPageVisibleRef.current = false;
-        if (isManuallyOnline) { 
+        if (isManuallyOnline) {
           remove(ref(db, userOnlinePath))
             .then(() => addDebugLog(`Page Visibility: Removed user ${currentSUser.id} from online list (was manually online).`))
             .catch(e => addDebugLog(`Page Visibility: Error removing user ${currentSUser.id} on page hide: ${e.message}`));
@@ -797,8 +797,18 @@ export default function HomePage() {
       } else {
         addDebugLog(`Page visible for ${currentSUser.id}. isManuallyOnline: ${isManuallyOnline}`);
         isPageVisibleRef.current = true;
-        if (isManuallyOnline) { 
+        if (isManuallyOnline) {
           updateUserOnlineStatus(true);
+           if (!currentSUser.isGoogleUser && anonymousSessionId === currentSUser.id) {
+            const userStatusDbRef = ref(db, userOnlinePath);
+             if (userStatusDbRef && typeof userStatusDbRef.onDisconnect === 'function') {
+                userStatusDbRef.onDisconnect().remove()
+                  .then(() => addDebugLog(`Anonymous Presence: onDisconnect().remove() re-set for ${currentSUser.id} on page visible.`))
+                  .catch(e => addDebugLog(`Anonymous Presence: ERROR re-setting onDisconnect for ${currentSUser.id}: ${e.message || e}`));
+             } else {
+                addDebugLog(`Page Visibility: ERROR - userStatusDbRef or onDisconnect not valid for anon ${currentSUser.id} on page visible.`);
+             }
+           }
         }
       }
     };
@@ -827,7 +837,7 @@ export default function HomePage() {
       addDebugLog(`Full cleanup on unmount complete for ${myIdOnUnmount || 'N/A'}.`);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authCurrentUser, isManuallyOnline]); 
+  }, [authCurrentUser, isManuallyOnline]);
 
   const handleBackToOnlineUsers = async () => {
     addDebugLog(`Handling back to online users from revealed state.`);
@@ -880,6 +890,38 @@ export default function HomePage() {
       setIsProfileEditDialogOpen(false);
     } catch (error) {
       addDebugLog(`Error saving profile: ${error}`);
+    }
+  };
+
+  const handleCreateRoom = () => {
+    addDebugLog("Creating new conference room.");
+    const newRoomKey = push(child(ref(db), 'conferenceRooms')).key;
+    if (newRoomKey) {
+      setCreatedRoomId(newRoomKey);
+      const link = `${window.location.origin}/room/${newRoomKey}`;
+      setRoomLink(link);
+      toast({ title: "Room Created!", description: "Share the link with others to join."});
+      addDebugLog(`Room created: ${newRoomKey}, Link: ${link}`);
+    } else {
+      toast({ title: "Error", description: "Could not create room key.", variant: "destructive" });
+      addDebugLog("Error: Failed to generate room key from Firebase.");
+    }
+  };
+
+  const handleJoinCreatedRoom = () => {
+    if (createdRoomId) {
+      router.push(`/room/${createdRoomId}`);
+    }
+  };
+
+  const copyRoomLink = () => {
+    if (roomLink) {
+      navigator.clipboard.writeText(roomLink)
+        .then(() => toast({ title: "Link Copied!", description: "Room link copied to clipboard." }))
+        .catch(err => {
+          toast({ title: "Copy Failed", description: "Could not copy link.", variant: "destructive" });
+          addDebugLog(`Failed to copy room link: ${err}`);
+        });
     }
   };
 
@@ -978,12 +1020,12 @@ export default function HomePage() {
 
       <div className="text-center mb-4">
         <h1 className="text-4xl font-bold text-primary mb-2">BlindSpot Social</h1>
-        <p className="text-lg text-foreground/80">Connect Directly. Chat Visually.</p>
+        <p className="text-lg text-foreground/80">Connect Directly. Chat Visually. Create Rooms.</p>
       </div>
 
       {chatState === 'idle' && sessionUser && !incomingCallOfferDetails && (
         <div className="flex flex-col items-center gap-6 p-6 bg-card rounded-xl shadow-xl w-full max-w-lg">
-          <Card className="w-full max-w-md shadow-md border-primary/50">
+          <Card className="w-full shadow-md border-primary/50">
             <CardHeader className="items-center text-center pb-4">
               <Avatar className="w-20 h-20 mb-3 border-2 border-primary shadow-sm">
                 <AvatarImage src={sessionUser.photoUrl} alt={sessionUser.name} data-ai-hint={sessionUser.dataAiHint || "avatar abstract"} />
@@ -1003,6 +1045,35 @@ export default function HomePage() {
               </Button>
             </CardContent>
           </Card>
+
+          <Card className="w-full shadow-md">
+            <CardHeader>
+              <CardTitle className="text-xl flex items-center gap-2"><UsersIcon className="w-5 h-5 text-primary" />Conference Rooms</CardTitle>
+              <CardDescription>Create a room and share the link for group video calls.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {!createdRoomId ? (
+                <Button onClick={handleCreateRoom} className="w-full">
+                  <Link2 className="mr-2 h-4 w-4" /> Create Room Link
+                </Button>
+              ) : (
+                <div className="space-y-3">
+                  <p className="text-sm text-muted-foreground">Room created! Share this link:</p>
+                  <div className="flex gap-2">
+                    <Input type="text" value={roomLink || ""} readOnly className="bg-muted/50"/>
+                    <Button onClick={copyRoomLink} variant="outline" size="icon" aria-label="Copy room link">
+                      <Link2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                  <Button onClick={handleJoinCreatedRoom} className="w-full">
+                    <VideoIcon className="mr-2 h-4 w-4" /> Go to Room
+                  </Button>
+                  <Button onClick={() => {setCreatedRoomId(null); setRoomLink(null);}} variant="link" className="text-xs p-0 h-auto">Create a new room</Button>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
 
           {!isManuallyOnline && (
             <div className="text-center p-4 my-4 bg-muted/50 rounded-md w-full">
@@ -1103,4 +1174,3 @@ export default function HomePage() {
     </MainLayout>
   );
 }
-
