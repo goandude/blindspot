@@ -71,7 +71,7 @@ export default function RoomPage() {
       const oldEntry = firebaseListeners.current.get(path + eventType);
       if (oldEntry) off(oldEntry.ref, oldEntry.eventType as any, oldEntry.callback);
     }
-    onValue(dbRef, callback, (error) => { // Using onValue for simplicity, but can be specific like onChildAdded for signals
+    onValue(dbRef, callback, (error) => { 
         addDebugLog(`ERROR reading from ${path} (event: ${eventType}): ${error.message}`);
     });
     firebaseListeners.current.set(path + eventType, { ref: dbRef, callback, eventType });
@@ -232,7 +232,7 @@ export default function RoomPage() {
             stream.dataAiHint = participantData?.dataAiHint;
         }
         event.streams[0].getTracks().forEach(track => {
-            if (!stream!.getTrackById(track.id)) { // Avoid duplicate tracks
+            if (!stream!.getTrackById(track.id)) { 
                 stream!.addTrack(track);
             }
         });
@@ -295,10 +295,7 @@ export default function RoomPage() {
         if (type === 'offer') {
           if (pc && pc.signalingState !== 'closed') {
             addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists and is not closed. Current state: ${pc.signalingState}. Potentially re-negotiating or cleaning up old one.`);
-            // Consider cleanup if offer is part of re-negotiation strategy, for now, let's assume new connection
-            // cleanupPeerConnection(senderId); 
           }
-          // Create new PC if not exists or if previous one was fully closed
           if(!pc || pc.signalingState === 'closed') {
             pc = new RTCPeerConnection(servers);
             peerConnectionsRef.current.set(senderId, pc);
@@ -436,9 +433,9 @@ export default function RoomPage() {
   }, [isInRoom, roomId, sessionUser, localStream, initializeAndSendOffer, cleanupPeerConnection, addDebugLog, addFirebaseDbListener, removeFirebaseDbListener]);
 
   const handleJoinRoom = async () => {
-    if (!sessionUser || !roomId) {
-      toast({ title: "Error", description: "Session or Room ID missing.", variant: "destructive" });
-      addDebugLog("JoinRoom: sessionUser or roomId missing.");
+    if (!sessionUser || !sessionUser.id || !roomId) {
+      toast({ title: "Error", description: "Session, User ID, or Room ID missing.", variant: "destructive" });
+      addDebugLog("JoinRoom: sessionUser, sessionUser.id, or roomId missing.");
       return;
     }
     addDebugLog(`Attempting to join room ${roomId} as ${sessionUser.name} (${sessionUser.id})`);
@@ -461,9 +458,14 @@ export default function RoomPage() {
           timestamp: serverTimestamp() 
         };
       await set(participantDbRef, participantData);
-      participantDbRef.onDisconnect().remove()
-        .then(() => addDebugLog(`onDisconnect set for participant ${sessionUser.id}`))
-        .catch(e => addDebugLog(`Error setting onDisconnect for participant ${sessionUser.id}: ${e.message}`));
+      
+      if (participantDbRef && typeof participantDbRef.onDisconnect === 'function') {
+        participantDbRef.onDisconnect().remove()
+          .then(() => addDebugLog(`onDisconnect set for participant ${sessionUser.id}`))
+          .catch(e => addDebugLog(`Error setting onDisconnect for participant ${sessionUser.id}: ${e.message}`));
+      } else {
+        addDebugLog(`ERROR: participantDbRef or onDisconnect not valid for participant ${sessionUser.id} in handleJoinRoom.`);
+      }
       
       setIsInRoom(true);
       toast({ title: "Joined Room!", description: `You are now in room ${roomId}.` });
@@ -527,10 +529,10 @@ export default function RoomPage() {
         if (videoTracks.length > 0) {
             showVideo = videoTracks.some(track => track.enabled && !track.muted);
         } else {
-            showVideo = false; // No video tracks
+            showVideo = false; 
         }
     } else {
-        showVideo = false; // No stream
+        showVideo = false; 
     }
     
     return (
@@ -624,7 +626,6 @@ export default function RoomPage() {
               <VideoFeed stream={localStream} user={sessionUser} isLocal />
             )}
             {Array.from(remoteStreams.entries()).map(([peerId, streamData]) => {
-                // streamData contains userId, userName, userPhotoUrl, etc. from when it was created.
                 return <VideoFeed key={peerId} stream={streamData} user={streamData} />;
             })}
           </div>
@@ -658,3 +659,4 @@ export default function RoomPage() {
     </MainLayout>
   );
 }
+
