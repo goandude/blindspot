@@ -46,7 +46,7 @@ export default function HomePage() {
   const [pageLoading, setPageLoading] = useState(true);
   const [isProfileEditDialogOpen, setIsProfileEditDialogOpen] = useState(false);
   const [incomingCallOfferDetails, setIncomingCallOfferDetails] = useState<IncomingCallOffer | null>(null);
-  const [isManuallyOnline, setIsManuallyOnline] = useState(true); // User's intended online status
+  const [isManuallyOnline, setIsManuallyOnline] = useState(true); 
 
   const { toast } = useToast();
   const {
@@ -70,6 +70,11 @@ export default function HomePage() {
   const chatStateRef = useRef<ChatState>(chatState);
   const currentSessionUserIdRef = useRef<string | null>(null);
   const isPageVisibleRef = useRef<boolean>(true);
+  const incomingCallOfferDetailsRef = useRef<IncomingCallOffer | null>(null);
+
+  useEffect(() => {
+    incomingCallOfferDetailsRef.current = incomingCallOfferDetails;
+  }, [incomingCallOfferDetails]);
 
   const addDebugLog = useCallback((message: string) => {
     const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
@@ -159,7 +164,7 @@ export default function HomePage() {
   const stopRingingSound = useCallback(() => {
     if (ringingAudioRef.current) {
       ringingAudioRef.current.pause();
-      ringingAudioRef.current.currentTime = 0; // Reset for next play
+      ringingAudioRef.current.currentTime = 0; 
       addDebugLog("Ringing sound stopped.");
     }
   }, [addDebugLog]);
@@ -259,7 +264,7 @@ export default function HomePage() {
     const wasConnected = ['connected', 'connecting', 'dialing'].includes(chatStateRef.current);
 
     stopRingingSound();
-    if (incomingCallOfferDetails) setIncomingCallOfferDetails(null);
+    if (incomingCallOfferDetailsRef.current) setIncomingCallOfferDetails(null);
 
     cleanupWebRTC();
     if (currentRoomIdVal) {
@@ -308,7 +313,7 @@ export default function HomePage() {
       peerIdRef.current = null;
     }
     isCallerRef.current = false;
-  }, [cleanupWebRTC, cleanupCallData, onlineUsers, peerInfo, removeFirebaseListener, addDebugLog, wrappedSetChatState, authCurrentUser, stopRingingSound, incomingCallOfferDetails]);
+  }, [cleanupWebRTC, cleanupCallData, onlineUsers, peerInfo, removeFirebaseListener, addDebugLog, wrappedSetChatState, authCurrentUser, stopRingingSound]);
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
     const myId = currentSessionUserIdRef.current;
@@ -543,32 +548,43 @@ export default function HomePage() {
   const handleAcceptCall = useCallback(async () => {
     addDebugLog("Call accepted by user.");
     stopRingingSound();
-    const offerToProcess = incomingCallOfferDetails;
-    setIncomingCallOfferDetails(null);
+    const offerToProcess = incomingCallOfferDetailsRef.current; 
+    setIncomingCallOfferDetails(null); 
     if (offerToProcess) {
       await processIncomingOfferAndAnswer(offerToProcess);
     } else {
-      addDebugLog("WARN: handleAcceptCall invoked but no offerDetails found.");
+      addDebugLog("WARN: handleAcceptCall invoked but no offerDetailsRef found.");
     }
-  }, [incomingCallOfferDetails, processIncomingOfferAndAnswer, stopRingingSound, addDebugLog]);
+  }, [processIncomingOfferAndAnswer, stopRingingSound, addDebugLog]);
 
   const handleDeclineCall = useCallback(async () => {
     addDebugLog("Call declined by user.");
     stopRingingSound();
-    const offerToDecline = incomingCallOfferDetails;
-    setIncomingCallOfferDetails(null);
+    const offerToDecline = incomingCallOfferDetailsRef.current; 
+    setIncomingCallOfferDetails(null); 
+
     if (offerToDecline && sessionUser?.id) {
       const pendingOfferPath = `callSignals/${sessionUser.id}/pendingOffer`;
       try {
-        await remove(ref(db, pendingOfferPath));
-        addDebugLog(`Removed pending offer from ${pendingOfferPath} after declining.`);
-        toast({ title: "Call Declined", variant: "default" });
+        const dbOfferSnapshot = await get(ref(db, pendingOfferPath));
+        if (dbOfferSnapshot.exists()) {
+          const dbOfferData = dbOfferSnapshot.val() as IncomingCallOffer;
+          if (dbOfferData.roomId === offerToDecline.roomId) {
+            await remove(ref(db, pendingOfferPath));
+            addDebugLog(`Removed pending offer from ${pendingOfferPath} after declining (room ${offerToDecline.roomId}).`);
+            toast({ title: "Call Declined", variant: "default" });
+          } else {
+            addDebugLog(`Decline: Offer in DB (room ${dbOfferData.roomId}) is different from declined offer (room ${offerToDecline.roomId}). Not removing from DB.`);
+          }
+        } else {
+          addDebugLog(`Decline: No pending offer found in DB at ${pendingOfferPath} to remove for declined room ${offerToDecline.roomId}.`);
+        }
       } catch (e: any) {
-        addDebugLog(`Error removing pending offer after declining: ${e.message || e}`);
+        addDebugLog(`Error managing pending offer after declining: ${e.message || e}`);
       }
     }
     wrappedSetChatState('idle'); 
-  }, [incomingCallOfferDetails, sessionUser, stopRingingSound, wrappedSetChatState, toast, addDebugLog]);
+  }, [sessionUser, stopRingingSound, wrappedSetChatState, toast, addDebugLog]);
 
 
   const updateUserOnlineStatus = useCallback((shouldBeOnline: boolean) => {
@@ -616,15 +632,13 @@ export default function HomePage() {
     });
   };
 
-  // Initial online status sync
   useEffect(() => {
-    if(sessionUser?.id){ // Ensure sessionUser is set before trying to update status
+    if(sessionUser?.id){ 
         updateUserOnlineStatus(isManuallyOnline);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionUser, isManuallyOnline]); // updateUserOnlineStatus is stable due to useCallback
+  }, [sessionUser, isManuallyOnline]); 
 
-  // ANONYMOUS Presence system - based on Firebase connection
   useEffect(() => {
     if (authCurrentUser || !anonymousSessionId) {
       addDebugLog("Anonymous Presence (connection): Skipping - Google user active or anonymousSessionId not ready.");
@@ -645,8 +659,8 @@ export default function HomePage() {
       }
       if (snapshot.val() === true) {
         addDebugLog(`Anonymous Presence (connection): Firebase connection established for ${myId}.`);
-        if (isManuallyOnline && isPageVisibleRef.current) { // Check manual status and visibility
-           updateUserOnlineStatus(true); // This will handle setting online and onDisconnect
+        if (isManuallyOnline && isPageVisibleRef.current) { 
+           updateUserOnlineStatus(true); 
         }
       } else {
         addDebugLog(`Anonymous Presence (connection): Firebase connection lost for ${myId}. onDisconnect should handle removal.`);
@@ -656,8 +670,7 @@ export default function HomePage() {
     return () => {
       addDebugLog(`Anonymous Presence (connection): Cleaning up for ${myId}. Detaching .info/connected listener.`);
       removeFirebaseListener(connectedDbRef.toString().substring(connectedDbRef.root.toString().length-1));
-      // Explicit removal on cleanup if they were supposed to be online
-      if (myId && isManuallyOnline) { // Check if they intended to be online
+      if (myId && isManuallyOnline) { 
         const pathToRemove = `onlineUsers/${myId}`;
         remove(ref(db, pathToRemove))
           .then(() => addDebugLog(`Anonymous Presence (connection): Explicitly removed user ${myId} on cleanup.`))
@@ -667,7 +680,6 @@ export default function HomePage() {
   }, [authCurrentUser, anonymousSessionId, sessionUser, addFirebaseListener, removeFirebaseListener, addDebugLog, isManuallyOnline, updateUserOnlineStatus]);
 
 
-  // Listener for all online users
   useEffect(() => {
     const onlineUsersDbRef = ref(db, 'onlineUsers');
     const onlineUsersCb = (snapshot: any) => {
@@ -689,12 +701,11 @@ export default function HomePage() {
     return () => removeFirebaseListener(onlineUsersDbRef.toString().substring(onlineUsersDbRef.root.toString().length-1));
   }, [addFirebaseListener, removeFirebaseListener, addDebugLog]);
 
-  // Listener for incoming calls (sets incomingCallOfferDetails)
   useEffect(() => {
     const myId = currentSessionUserIdRef.current;
     if (!myId) {
       addDebugLog(`Incoming call listener: No active user ID (currentSessionUserIdRef is ${myId}).`);
-      if (incomingCallOfferDetails) { 
+      if (incomingCallOfferDetailsRef.current) { 
         setIncomingCallOfferDetails(null);
         stopRingingSound();
       }
@@ -706,14 +717,16 @@ export default function HomePage() {
     const incomingCallDbRef = ref(db, incomingCallDbRefPath);
 
     const incomingCallCb = (snapshot: any) => {
-      const offerData = snapshot.val() as IncomingCallOffer | null;
-      addDebugLog(`Offer listener at ${incomingCallDbRefPath} triggered. Data exists: ${!!offerData}. Current chat state: ${chatStateRef.current}. Current Incoming Offer: ${!!incomingCallOfferDetails}. Manually Online: ${isManuallyOnline}`);
+      const newOfferData = snapshot.val() as IncomingCallOffer | null;
+      const currentDisplayedOffer = incomingCallOfferDetailsRef.current;
 
-      if (offerData) {
+      addDebugLog(`Offer listener triggered. New data exists: ${!!newOfferData}. Current displayed offer RoomID: ${currentDisplayedOffer?.roomId}. Chat state: ${chatStateRef.current}. Manually Online: ${isManuallyOnline}`);
+
+      if (newOfferData) {
         if (!isManuallyOnline) {
-            addDebugLog(`Incoming call for ${myId} from ${offerData.callerId} but user is manually OFFLINE. Removing stale offer.`);
+            addDebugLog(`Incoming call for ${myId} from ${newOfferData.callerId} but user is manually OFFLINE. Removing offer from DB.`);
             remove(incomingCallDbRef).catch(e => addDebugLog(`WARN: Error removing stale offer (user offline): ${e.message || e}`));
-            if (incomingCallOfferDetails?.roomId === offerData.roomId) {
+            if (currentDisplayedOffer?.roomId === newOfferData.roomId) {
                 setIncomingCallOfferDetails(null);
                 stopRingingSound();
             }
@@ -721,22 +734,30 @@ export default function HomePage() {
         }
 
         if (chatStateRef.current === 'idle') {
-          addDebugLog(`Valid offer received by ${myId} from ${offerData.callerName}. Setting to state.`);
-          setIncomingCallOfferDetails(offerData);
-          playRingingSound();
-          toast({ title: "Incoming Call", description: `From ${offerData.callerName}`, duration: 15000 });
-        } else {
-          addDebugLog(`WARN: ${myId} received offer from ${offerData.callerId} while in state ${chatStateRef.current}. Removing stale offer.`);
-          remove(incomingCallDbRef).catch(e => addDebugLog(`WARN: Error removing stale offer by ${myId}: ${e.message || e}`));
-          if (incomingCallOfferDetails?.roomId === offerData.roomId) { 
+          if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) { 
+            addDebugLog(`Valid new/different offer by ${myId} from ${newOfferData.callerName}. Setting to state. New Room: ${newOfferData.roomId}`);
+            setIncomingCallOfferDetails(newOfferData);
+            playRingingSound();
+            toast({ title: "Incoming Call", description: `From ${newOfferData.callerName}`, duration: 15000 });
+          } else {
+            addDebugLog(`Offer listener: Received same offer data (Room: ${newOfferData.roomId}) as currently displayed. No state change needed.`);
+          }
+        } else { // User is not idle (e.g. in another call, dialing)
+          addDebugLog(`WARN: ${myId} received offer from ${newOfferData.callerId} (room ${newOfferData.roomId}) while in state ${chatStateRef.current}. Removing this offer from DB as user is busy.`);
+          // Only remove if it's a different offer than one potentially being processed or if we are truly busy.
+          if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
+             remove(incomingCallDbRef).catch(e => addDebugLog(`WARN: Error removing offer (user busy) by ${myId} from DB: ${e.message || e}`));
+          }
+          // If the current displayed offer (somehow, if logic allows) matches this new one while busy, clear it
+          if (currentDisplayedOffer?.roomId === newOfferData.roomId) { 
             setIncomingCallOfferDetails(null);
             stopRingingSound();
           }
         }
-      } else { 
+      } else { // newOfferData is null (offer removed from Firebase)
         addDebugLog(`Offer listener at ${incomingCallDbRefPath} received null data.`);
-        if (incomingCallOfferDetails) { 
-          addDebugLog(`Pending offer removed for ${myId} (likely by caller or processed). Stopping ring if active.`);
+        if (currentDisplayedOffer) { 
+          addDebugLog(`Pending offer (room ${currentDisplayedOffer.roomId}) removed for ${myId}. Clearing displayed offer & stopping ring.`);
           setIncomingCallOfferDetails(null);
           stopRingingSound();
         }
@@ -747,11 +768,15 @@ export default function HomePage() {
     return () => {
       addDebugLog(`Cleaning up incoming call listener for path: ${incomingCallDbRefPath}`);
       removeFirebaseListener(incomingCallDbRefPath);
-      stopRingingSound(); 
+      if(incomingCallOfferDetailsRef.current && incomingCallOfferDetailsRef.current.callerId === myId) {
+         // If the offer being cleared was one *I* made (which shouldn't be handled by *this* listener path),
+         // it implies complex state. Usually this listener is for offers *to* me.
+         // For safety, ensure ringing stops if any offer was displayed.
+      }
+      stopRingingSound(); // General stop on cleanup
     };
-  }, [currentSessionUserIdRef.current, addFirebaseListener, removeFirebaseListener, addDebugLog, playRingingSound, stopRingingSound, toast, incomingCallOfferDetails, isManuallyOnline]);
+  }, [currentSessionUserIdRef.current, addFirebaseListener, removeFirebaseListener, addDebugLog, playRingingSound, stopRingingSound, toast, isManuallyOnline]);
 
-  // Page Visibility API
   useEffect(() => {
     const handleVisibilityChange = () => {
       const currentSUser = sessionUser;
@@ -760,19 +785,20 @@ export default function HomePage() {
         return;
       }
       
+      const userOnlinePath = `onlineUsers/${currentSUser.id}`;
       if (document.hidden) {
         addDebugLog(`Page hidden for ${currentSUser.id}. isManuallyOnline: ${isManuallyOnline}`);
         isPageVisibleRef.current = false;
-        if (isManuallyOnline) { // Only remove if they were manually online
-          remove(ref(db, `onlineUsers/${currentSUser.id}`))
+        if (isManuallyOnline) { 
+          remove(ref(db, userOnlinePath))
             .then(() => addDebugLog(`Page Visibility: Removed user ${currentSUser.id} from online list (was manually online).`))
             .catch(e => addDebugLog(`Page Visibility: Error removing user ${currentSUser.id} on page hide: ${e.message}`));
         }
       } else {
         addDebugLog(`Page visible for ${currentSUser.id}. isManuallyOnline: ${isManuallyOnline}`);
         isPageVisibleRef.current = true;
-        if (isManuallyOnline) { // Only add back if they are meant to be online
-          updateUserOnlineStatus(true); // This will add user and set onDisconnect if needed
+        if (isManuallyOnline) { 
+          updateUserOnlineStatus(true);
         }
       }
     };
@@ -787,14 +813,12 @@ export default function HomePage() {
     };
   }, [sessionUser, addDebugLog, authCurrentUser, anonymousSessionId, isManuallyOnline, updateUserOnlineStatus]);
 
-  // Cleanup effect for component unmount
   useEffect(() => {
     const myIdOnUnmount = currentSessionUserIdRef.current;
     return () => {
       addDebugLog(`HomePage unmounting for user ${myIdOnUnmount || 'N/A'}. Performing full cleanup.`);
       handleEndCall(false);
       cleanupAllFirebaseListeners();
-      // Presence removal on unmount is now handled by isManuallyOnline logic or useAuth's onDisconnect
       if (myIdOnUnmount && isManuallyOnline) {
         addDebugLog(`User ${myIdOnUnmount} was manually online, ensuring removal if not handled by onDisconnect (e.g., anon user).`);
         remove(ref(db, `onlineUsers/${myIdOnUnmount}`))
