@@ -54,7 +54,6 @@ export default function RoomPage() {
   }, [participants]);
 
   const addDebugLog = useCallback((message: string) => {
-    // Debug logging is now internal, not displayed in UI
     // console.log(`[Room DEBUG] ${roomId?.substring(0,4) || 'N/A'} - ${sessionUser?.id?.substring(0,4) || 'N/A'} - ${message}`);
   }, [sessionUser, roomId]);
 
@@ -202,7 +201,15 @@ export default function RoomPage() {
         return newRemoteStreams;
       });
     };
-    pc.oniceconnectionstatechange = () => { addDebugLog(`ICE state for ${peerId}: ${pc.iceConnectionState}`); if (['failed', 'disconnected', 'closed'].includes(pc.iceConnectionState)) { addDebugLog(`ICE connection to ${peerId} ${pc.iceConnectionState}. Cleaning up.`); cleanupPeerConnection(peerId); }};
+    pc.oniceconnectionstatechange = () => { 
+      addDebugLog(`ICE state for ${peerId}: ${pc.iceConnectionState}`); 
+      if (['failed', 'closed'].includes(pc.iceConnectionState)) { 
+        addDebugLog(`ICE connection to ${peerId} ${pc.iceConnectionState}. Cleaning up.`); 
+        cleanupPeerConnection(peerId); 
+      } else if (pc.iceConnectionState === 'disconnected') {
+        addDebugLog(`ICE connection to ${peerId} is disconnected. Monitoring for potential recovery or failure.`);
+      }
+    };
     pc.onsignalingstatechange = () => addDebugLog(`Signaling state for ${peerId}: ${pc.signalingState}`);
     try {
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer); addDebugLog(`Offer created and local description set for ${peerId}.`);
@@ -226,7 +233,7 @@ export default function RoomPage() {
           if (pc && pc.signalingState !== 'closed') { addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists and is not closed. State: ${pc.signalingState}. Cleaning up old one.`); cleanupPeerConnection(senderId); }
           pc = new RTCPeerConnection(servers); peerConnectionsRef.current.set(senderId, pc); addDebugLog(`Created new PC for offer from ${senderId}`);
           localStream.getTracks().forEach(track => { try { pc!.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} to PC for ${senderId} (on offer)`);} catch (e:any) { addDebugLog(`Error adding local track on offer from ${senderId}: ${e.message}`); }});
-          pc.onicecandidate = event => { if (event.candidate && roomId && sessionUser?.id) { addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`); const candidatePayload: RoomSignal = { type: 'candidate', senderId: sessionUser.id, senderName: sessionUser.name, data: event.candidate.toJSON() }; set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`)); }};
+          pc.onicecandidate = event => { if (event.candidate && roomId && sessionUser?.id) { addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`); const candidatePayload: RoomSignal = { type: 'candidate', senderId: sessionUser.id!, senderName: sessionUser.name, data: event.candidate.toJSON() }; set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`)); }};
           pc.ontrack = event => {
             addDebugLog(`Remote track received from ${senderId} (on offer path): Kind: ${event.track.kind}`);
             setRemoteStreams(prevRemoteStreams => {
@@ -242,7 +249,14 @@ export default function RoomPage() {
               return newRemoteStreams;
             });
           };
-          pc.oniceconnectionstatechange = () => { addDebugLog(`ICE state for ${senderId} (on offer path): ${pc!.iceConnectionState}`); if (['failed', 'disconnected', 'closed'].includes(pc!.iceConnectionState)) { addDebugLog(`ICE connection to ${senderId} ${pc!.iceConnectionState} (on offer path). Cleaning up.`); cleanupPeerConnection(senderId); }};
+          pc.oniceconnectionstatechange = () => { 
+            addDebugLog(`ICE state for ${senderId} (on offer path): ${pc!.iceConnectionState}`); 
+            if (['failed', 'closed'].includes(pc!.iceConnectionState)) { 
+              addDebugLog(`ICE connection to ${senderId} ${pc!.iceConnectionState} (on offer path). Cleaning up.`); cleanupPeerConnection(senderId); 
+            } else if (pc!.iceConnectionState === 'disconnected') {
+              addDebugLog(`ICE connection to ${senderId} (on offer path) is disconnected. Monitoring for potential recovery or failure.`);
+            }
+          };
           pc.onsignalingstatechange = () => addDebugLog(`Signaling state for ${senderId} (on offer path): ${pc!.signalingState}`);
           pc!.setRemoteDescription(new RTCSessionDescription(data as RTCSessionDescriptionInit))
             .then(() => { addDebugLog(`Remote desc (offer) from ${senderId} set.`); return pc!.createAnswer(); })
@@ -293,13 +307,13 @@ export default function RoomPage() {
   const copyRoomLinkToClipboard = () => { const link = window.location.href; navigator.clipboard.writeText(link).then(() => toast({ title: "Link Copied!", description: "Room link copied to clipboard." })).catch(err => toast({ title: "Copy Failed", description: "Could not copy link.", variant: "destructive" })); };
   
   const calculateGridStyle = (participantCount: number): React.CSSProperties => {
-    if (participantCount <= 0) participantCount = 1;
+    if (participantCount <= 0) participantCount = 1; // Ensure at least 1 for calculation if local stream is counted
     let cols = 1;
     if (participantCount === 2) cols = 2;
     else if (participantCount <= 4) cols = 2;
     else if (participantCount <= 6) cols = 3;
     else if (participantCount <= 9) cols = 3;
-    else cols = 4; // For 10 or more
+    else cols = 4; 
   
     return {
       gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
@@ -333,7 +347,7 @@ export default function RoomPage() {
       <div className="flex flex-col h-screen bg-black text-white relative">
         {isInRoom && (
           <div 
-            className="flex-grow p-1 sm:p-2 md:p-4 grid gap-1 sm:gap-2 md:gap-4 items-start justify-center overflow-auto" // items-start might be better
+            className="flex-grow p-1 sm:p-2 md:p-4 grid gap-1 sm:gap-2 md:gap-4 items-start justify-center overflow-auto"
             style={calculateGridStyle(totalStreamsToDisplay > 0 ? totalStreamsToDisplay : 1)}
           >
             {localStream && sessionUser && (
@@ -394,3 +408,5 @@ export default function RoomPage() {
     </MainLayout>
   );
 }
+
+    
