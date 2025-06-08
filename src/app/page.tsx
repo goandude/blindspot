@@ -95,37 +95,55 @@ export default function HomePage() {
   }, [chatState]);
 
   useEffect(() => {
-    const newAnonId = generateAnonymousSessionId();
-    setAnonymousSessionId(newAnonId);
-    addDebugLog(`Generated new anonymous session ID: ${newAnonId}`);
-  }, [addDebugLog]);
-
-  useEffect(() => {
     addDebugLog(`Auth state update: authLoading=${authLoading}, authProfileLoading=${authProfileLoading}, authCurrentUser=${authCurrentUser?.uid}, isProfileSetupNeeded=${isProfileSetupNeeded}, anonymousSessionId=${anonymousSessionId}`);
+
     if (authLoading) {
       addDebugLog("Auth state is loading (authLoading=true), page remains in loading state.");
       setPageLoading(true);
       return;
     }
-    if (authCurrentUser && authProfileLoading) {
-      addDebugLog(`Auth user ${authCurrentUser.uid} present, but profile is loading (authProfileLoading=true). Page remains loading.`);
-      setPageLoading(true);
-      return;
-    }
 
-    if (authCurrentUser && authUserProfile && !isProfileSetupNeeded) {
-      addDebugLog(`Google user authenticated and profile ready: ${authUserProfile.name} (${authCurrentUser.uid}). Setting as sessionUser.`);
-      const googleSessionUser: OnlineUser = {
-        id: authCurrentUser.uid, name: authUserProfile.name, photoUrl: authUserProfile.photoUrl,
-        dataAiHint: authUserProfile.dataAiHint, countryCode: authUserProfile.countryCode, isGoogleUser: true,
-      };
-      setSessionUser(googleSessionUser); currentSessionUserIdRef.current = authCurrentUser.uid;
-      addDebugLog(`Active session user (Google): ${googleSessionUser.name} (${googleSessionUser.id})`);
-      setPageLoading(false);
-    } else if (authCurrentUser && isProfileSetupNeeded) {
-      addDebugLog(`Google user ${authCurrentUser.uid} authenticated, but profile setup is needed. Page loading false, ProfileSetupDialog should show.`);
-      setPageLoading(false);
-    } else if (!authCurrentUser && anonymousSessionId) {
+    // Auth is NOT loading anymore. Now check for currentUser.
+    if (authCurrentUser) {
+      if (authProfileLoading) {
+        addDebugLog(`Auth user ${authCurrentUser.uid} present, but profile is loading (authProfileLoading=true). Page remains loading.`);
+        setPageLoading(true);
+        return;
+      }
+      
+      if (authUserProfile && !isProfileSetupNeeded) {
+        addDebugLog(`Google user authenticated and profile ready: ${authUserProfile.name} (${authCurrentUser.uid}). Setting as sessionUser.`);
+        const googleSessionUser: OnlineUser = {
+          id: authCurrentUser.uid, name: authUserProfile.name, photoUrl: authUserProfile.photoUrl,
+          dataAiHint: authUserProfile.dataAiHint, countryCode: authUserProfile.countryCode, isGoogleUser: true,
+        };
+        setSessionUser(googleSessionUser); currentSessionUserIdRef.current = authCurrentUser.uid;
+        addDebugLog(`Active session user (Google): ${googleSessionUser.name} (${googleSessionUser.id})`);
+        setPageLoading(false);
+        if (anonymousSessionId) {
+            addDebugLog(`Clearing anonymousSessionId (${anonymousSessionId}) as Google user is active.`);
+            setAnonymousSessionId(null);
+        }
+      } else if (isProfileSetupNeeded) {
+        addDebugLog(`Google user ${authCurrentUser.uid} authenticated, but profile setup is needed. Page loading false, ProfileSetupDialog should show.`);
+        setPageLoading(false);
+         if (anonymousSessionId) {
+            addDebugLog(`Clearing anonymousSessionId (${anonymousSessionId}) as Google user profile setup is needed.`);
+            setAnonymousSessionId(null);
+        }
+      } else {
+        addDebugLog(`WARN: authCurrentUser exists but authUserProfile is null and profile not loading/setup needed. User: ${authCurrentUser.uid}`);
+        setPageLoading(false);
+      }
+    } else { // No authCurrentUser (auth is confirmed not loading) -> This is an anonymous user.
+      if (!anonymousSessionId) { // Generate anonymous ID if it doesn't exist yet AND we've confirmed no Google user
+        const newAnonId = generateAnonymousSessionId();
+        setAnonymousSessionId(newAnonId);
+        addDebugLog(`Generated new anonymous session ID (authLoading false, no Google user): ${newAnonId}.`);
+        setPageLoading(true); // Set loading to true while we fetch country for new anon user
+        return; // Return to allow state update and re-run effect
+      }
+
       addDebugLog(`No Google user. Using anonymous session ID: ${anonymousSessionId}.`);
       const fetchCountryAndSetAnonymousUser = async () => {
         addDebugLog(`Fetching country for anonymous user ${anonymousSessionId}.`);
@@ -145,14 +163,9 @@ export default function HomePage() {
         setPageLoading(false);
       };
       fetchCountryAndSetAnonymousUser();
-    } else if (!authCurrentUser && !anonymousSessionId) {
-      addDebugLog("Waiting for anonymous session ID to be generated. Page loading true.");
-      setPageLoading(true);
-    } else {
-      addDebugLog(`Fell through sessionUser determination logic. Current user: ${authCurrentUser?.uid}, Anon ID: ${anonymousSessionId}. Setting pageLoading to false.`);
-      setPageLoading(false);
     }
   }, [authCurrentUser, authUserProfile, anonymousSessionId, authLoading, authProfileLoading, isProfileSetupNeeded, addDebugLog]);
+
 
   const wrappedSetChatState = useCallback((newState: ChatState) => {
     addDebugLog(`Chat state changing from ${chatStateRef.current} to: ${newState}`);
@@ -1019,7 +1032,7 @@ export default function HomePage() {
       </div>
 
       <div className="text-center mb-4">
-        <h1 className="text-4xl font-bold text-primary mb-2">BlindSpot Social</h1>
+        <h1 className="text-4xl font-bold text-primary mb-2">BlindSpot Social v1.1</h1>
         <p className="text-lg text-foreground/80">Connect Directly. Chat Visually. Create Rooms.</p>
       </div>
 
@@ -1174,3 +1187,6 @@ export default function HomePage() {
     </MainLayout>
   );
 }
+
+
+    
