@@ -7,10 +7,10 @@ import { VideoChatPlaceholder } from '@/components/features/chat/video-chat-plac
 import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { ProfileSetupDialog } from '@/components/features/profile/profile-setup-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
-import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile } from '@/types';
-import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff, Link2, Users as UsersIcon } from 'lucide-react';
-import { db } from '@/lib/firebase';
-import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get } from 'firebase/database';
+import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile, ChatMessage } from '@/types'; // Added ChatMessage
+import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff, Link2, Users as UsersIcon, MessageSquare } from 'lucide-react'; // Added MessageSquare
+import { db } from '@/lib/firebase'; // storage might be needed later
+import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get, query, limitToLast, orderByKey } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { OnlineUsersPanel } from '@/components/features/online-users/online-users-panel';
@@ -21,6 +21,8 @@ import { useAuth } from '@/hooks/use-auth';
 import { IncomingCallDialog } from '@/components/features/call/incoming-call-dialog';
 import { useRouter } from 'next/navigation';
 import { Input } from '@/components/ui/input';
+import { ChatPanel } from '@/components/features/chat/chat-panel'; // Import ChatPanel
+import { cn } from '@/lib/utils';
 
 
 type ChatState = 'idle' | 'dialing' | 'connecting' | 'connected' | 'revealed';
@@ -33,6 +35,12 @@ const servers = {
 };
 
 const generateAnonymousSessionId = () => Math.random().toString(36).substring(2, 10);
+
+// Helper function to create a consistent direct chat ID
+const getDirectChatId = (userId1: string, userId2: string): string => {
+  return [userId1, userId2].sort().join('_');
+};
+
 
 export default function HomePage() {
   const [anonymousSessionId, setAnonymousSessionId] = useState<string | null>(null);
@@ -53,6 +61,12 @@ export default function HomePage() {
   const [createdRoomId, setCreatedRoomId] = useState<string | null>(null);
   const [roomLink, setRoomLink] = useState<string | null>(null);
 
+  // States for 1-to-1 chat
+  const [directChatMessages, setDirectChatMessages] = useState<ChatMessage[]>([]);
+  const [currentDirectChatId, setCurrentDirectChatId] = useState<string | null>(null);
+  const [isDirectChatPanelOpen, setIsDirectChatPanelOpen] = useState(false);
+
+
   const { toast } = useToast();
   const router = useRouter();
   const {
@@ -72,7 +86,7 @@ export default function HomePage() {
   const isCallerRef = useRef<boolean>(false);
   const ringingAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const firebaseListeners = useRef<Map<string, { ref: DatabaseReference, callback: (snapshot: any) => void, eventType: string }>>(new Map());
+  const firebaseListeners = useRef<Map<string, { ref: DatabaseReference | ReturnType<typeof query>, callback: (snapshot: any) => void, eventType: string }>>(new Map());
   const chatStateRef = useRef<ChatState>(chatState);
   const currentSessionUserIdRef = useRef<string | null>(null);
   const isPageVisibleRef = useRef<boolean>(true);
@@ -92,7 +106,19 @@ export default function HomePage() {
 
   useEffect(() => {
     chatStateRef.current = chatState;
-  }, [chatState]);
+    // When chat state becomes 'connected', try to establish direct chat ID
+    if (chatState === 'connected' && sessionUser?.id && peerIdRef.current) {
+        const directChatId = getDirectChatId(sessionUser.id, peerIdRef.current);
+        setCurrentDirectChatId(directChatId);
+        addDebugLog(`Direct chat ID set: ${directChatId}`);
+    } else if (chatState !== 'connected' && currentDirectChatId) {
+        setCurrentDirectChatId(null); // Clear chat ID if not connected
+        setDirectChatMessages([]); // Clear messages
+        setIsDirectChatPanelOpen(false); // Close panel
+        addDebugLog("Direct chat ID cleared.");
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chatState, sessionUser, addDebugLog]); // peerIdRef.current is managed via ref, so not a direct dep here
 
   useEffect(() => {
     addDebugLog(`Auth state update: authLoading=${authLoading}, authProfileLoading=${authProfileLoading}, authCurrentUser=${authCurrentUser?.uid}, isProfileSetupNeeded=${isProfileSetupNeeded}, anonymousSessionId=${anonymousSessionId}`);
@@ -102,15 +128,12 @@ export default function HomePage() {
       setPageLoading(true);
       return;
     }
-
-    // Auth is NOT loading anymore. Now check for currentUser.
-    if (authCurrentUser) {
+    
+    if (authCurrentUser) { // Google user is present
       if (authProfileLoading) {
         addDebugLog(`Auth user ${authCurrentUser.uid} present, but profile is loading (authProfileLoading=true). Page remains loading.`);
-        setPageLoading(true);
-        return;
+        setPageLoading(true); return;
       }
-      
       if (authUserProfile && !isProfileSetupNeeded) {
         addDebugLog(`Google user authenticated and profile ready: ${authUserProfile.name} (${authCurrentUser.uid}). Setting as sessionUser.`);
         const googleSessionUser: OnlineUser = {
@@ -122,28 +145,28 @@ export default function HomePage() {
         setPageLoading(false);
         if (anonymousSessionId) {
             addDebugLog(`Clearing anonymousSessionId (${anonymousSessionId}) as Google user is active.`);
-            setAnonymousSessionId(null);
+            setAnonymousSessionId(null); // Clear anonymous ID if a Google user is now active
         }
       } else if (isProfileSetupNeeded) {
         addDebugLog(`Google user ${authCurrentUser.uid} authenticated, but profile setup is needed. Page loading false, ProfileSetupDialog should show.`);
         setPageLoading(false);
-         if (anonymousSessionId) {
+        if (anonymousSessionId) {
             addDebugLog(`Clearing anonymousSessionId (${anonymousSessionId}) as Google user profile setup is needed.`);
             setAnonymousSessionId(null);
         }
       } else {
-        addDebugLog(`WARN: authCurrentUser exists but authUserProfile is null and profile not loading/setup needed. User: ${authCurrentUser.uid}`);
-        setPageLoading(false);
+        addDebugLog(`WARN: authCurrentUser exists but authUserProfile is null and profile not loading/setup needed. User: ${authCurrentUser.uid}. This might indicate an issue with profile creation/fetching logic in useAuth.`);
+        setPageLoading(false); // Allow UI to render, useAuth should handle profile logic
       }
-    } else { // No authCurrentUser (auth is confirmed not loading) -> This is an anonymous user.
-      if (!anonymousSessionId) { // Generate anonymous ID if it doesn't exist yet AND we've confirmed no Google user
+    } else { // No Google user (authLoading is false) -> This implies anonymous user path
+      if (!anonymousSessionId) { // Generate anonymous ID ONLY if auth is done and NO Google user
         const newAnonId = generateAnonymousSessionId();
         setAnonymousSessionId(newAnonId);
-        addDebugLog(`Generated new anonymous session ID (authLoading false, no Google user): ${newAnonId}.`);
-        setPageLoading(true); // Set loading to true while we fetch country for new anon user
+        addDebugLog(`Generated new anonymous session ID (auth confirmed no Google user): ${newAnonId}.`);
+        setPageLoading(true); // Set loading true while we fetch country for new anon user
         return; // Return to allow state update and re-run effect
       }
-
+      
       addDebugLog(`No Google user. Using anonymous session ID: ${anonymousSessionId}.`);
       const fetchCountryAndSetAnonymousUser = async () => {
         addDebugLog(`Fetching country for anonymous user ${anonymousSessionId}.`);
@@ -162,9 +185,15 @@ export default function HomePage() {
         addDebugLog(`Anonymous session user created: ${anonUser.name} (${anonUser.id}) with country ${anonUser.countryCode}`);
         setPageLoading(false);
       };
-      fetchCountryAndSetAnonymousUser();
+      
+      // Ensure we don't try to set an anonymous user if a Google user just signed in (and anonymousSessionId hasn't cleared yet)
+      if (!authCurrentUser && anonymousSessionId && (!sessionUser || sessionUser.id !== anonymousSessionId)) {
+          fetchCountryAndSetAnonymousUser();
+      } else if (sessionUser && sessionUser.id === anonymousSessionId) {
+          setPageLoading(false); // Already set up this anonymous user
+      }
     }
-  }, [authCurrentUser, authUserProfile, anonymousSessionId, authLoading, authProfileLoading, isProfileSetupNeeded, addDebugLog]);
+  }, [authCurrentUser, authUserProfile, anonymousSessionId, authLoading, authProfileLoading, isProfileSetupNeeded, addDebugLog, sessionUser]);
 
 
   const wrappedSetChatState = useCallback((newState: ChatState) => {
@@ -192,7 +221,7 @@ export default function HomePage() {
     const listenerEntry = firebaseListeners.current.get(path);
     if (listenerEntry) {
       try {
-        off(listenerEntry.ref, listenerEntry.eventType, listenerEntry.callback);
+        off(listenerEntry.ref, listenerEntry.eventType as any, listenerEntry.callback); // Cast for Query compatibility
         addDebugLog(`Successfully removed Firebase listener for path: ${path} (type: ${listenerEntry.eventType})`);
       } catch (error: any) {
         addDebugLog(`WARN: Error unsubscribing Firebase listener for path ${path} (type: ${listenerEntry.eventType}): ${error.message || error}`);
@@ -201,18 +230,22 @@ export default function HomePage() {
     }
   }, [addDebugLog]);
 
-  const addFirebaseListener = useCallback((dbRef: DatabaseReference, listenerFunc: (snapshot: any) => void, eventType: string = 'value') => {
-    const path = dbRef.toString().substring(dbRef.root.toString().length -1);
+  const addFirebaseListener = useCallback((dbQueryOrRef: DatabaseReference | ReturnType<typeof query>, listenerFunc: (snapshot: any) => void, eventType: string = 'value') => {
+    const path = dbQueryOrRef.toString().substring(dbQueryOrRef.root.toString().length -1);
     if (firebaseListeners.current.has(path)) {
       addDebugLog(`Listener for path ${path} (type: ${eventType}) already exists. Removing old one first.`);
       removeFirebaseListener(path);
     }
     const actualCallback = (snapshot: any) => listenerFunc(snapshot);
-    onValue(dbRef, actualCallback, (error) => {
+    
+    // For 'child_added', we need to use onChildAdded, not onValue
+    // However, for simplicity and consistency with existing code, using onValue and processing children.
+    // If performance becomes an issue with large chat lists, switch to onChildAdded.
+    onValue(dbQueryOrRef, actualCallback, (error) => { // @ts-ignore - onValue can take Query
       addDebugLog(`ERROR reading from ${path} (event: ${eventType}): ${error.message}`);
       toast({ title: "Firebase Error", description: `Failed to listen to ${path}. Check console.`, variant: "destructive" });
     });
-    firebaseListeners.current.set(path, { ref: dbRef, callback: actualCallback, eventType });
+    firebaseListeners.current.set(path, { ref: dbQueryOrRef, callback: actualCallback, eventType });
     addDebugLog(`Added Firebase listener for path: ${path} with eventType: ${eventType}`);
   }, [addDebugLog, toast, removeFirebaseListener]);
 
@@ -220,7 +253,7 @@ export default function HomePage() {
     addDebugLog(`Cleaning up ALL (${firebaseListeners.current.size}) Firebase listeners.`);
     firebaseListeners.current.forEach((listenerEntry, path) => {
       try {
-        off(listenerEntry.ref, listenerEntry.eventType, listenerEntry.callback);
+        off(listenerEntry.ref, listenerEntry.eventType as any, listenerEntry.callback);
         addDebugLog(`Cleaned up listener for ${path} (type: ${listenerEntry.eventType})`);
       } catch (error: any) {
         addDebugLog(`WARN: Error unsubscribing Firebase listener during general cleanup for path: ${path} - ${error.message || error}`);
@@ -240,7 +273,7 @@ export default function HomePage() {
       peerConnectionRef.current.getSenders().forEach(sender => {
         if (sender.track) {
           addDebugLog(`Stopping sender track: ${sender.track.kind}`);
-          sender.track.stop();
+          sender.track.stop(); // This is OK for 1-to-1, as localStream is re-acquired
         }
       });
       if (peerConnectionRef.current.signalingState !== 'closed') {
@@ -790,6 +823,38 @@ export default function HomePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentSessionUserIdRef.current, addFirebaseListener, removeFirebaseListener, addDebugLog, playRingingSound, stopRingingSound, toast, isManuallyOnline]);
 
+
+  // Listener for Direct Chat Messages
+  useEffect(() => {
+    if (!currentDirectChatId || !sessionUser?.id) {
+      if (currentDirectChatId) {
+        removeFirebaseListener(`directChats/${currentDirectChatId}/messages`);
+        setDirectChatMessages([]);
+      }
+      return;
+    }
+
+    addDebugLog(`Attaching direct chat listener for chat ID: ${currentDirectChatId}`);
+    const directChatMessagesQuery = query(ref(db, `directChats/${currentDirectChatId}/messages`), orderByKey(), limitToLast(50));
+    
+    const directChatCallback = (snapshot: any) => {
+      const messages: ChatMessage[] = [];
+      snapshot.forEach((childSnapshot: any) => {
+        messages.push({ id: childSnapshot.key!, ...childSnapshot.val() } as ChatMessage);
+      });
+      setDirectChatMessages(messages);
+      addDebugLog(`Direct chat messages updated for ${currentDirectChatId}. Count: ${messages.length}`);
+    };
+
+    addFirebaseListener(directChatMessagesQuery, directChatCallback, 'value');
+
+    return () => {
+      addDebugLog(`Cleaning up direct chat listener for chat ID: ${currentDirectChatId}`);
+      removeFirebaseListener(`directChats/${currentDirectChatId}/messages`);
+    };
+  }, [currentDirectChatId, sessionUser?.id, addFirebaseListener, removeFirebaseListener, addDebugLog]);
+
+
   useEffect(() => {
     const handleVisibilityChange = () => {
       const currentSUser = sessionUser;
@@ -937,6 +1002,30 @@ export default function HomePage() {
         });
     }
   };
+
+  const handleSendDirectMessage = useCallback(async (text: string, attachments?: File[]) => {
+    if (!currentDirectChatId || !sessionUser || text.trim() === '') return;
+     // File attachment logic to be added later
+    if (attachments && attachments.length > 0) {
+        toast({title: "Note", description: "File attachments not yet implemented for direct chat.", variant: "default"});
+    }
+    const messageData: Omit<ChatMessage, 'id' | 'timestamp'> & { timestamp: object } = {
+        chatRoomId: currentDirectChatId,
+        senderId: sessionUser.id,
+        senderName: sessionUser.name,
+        senderPhotoUrl: sessionUser.photoUrl,
+        text: text.trim(),
+        timestamp: serverTimestamp(),
+    };
+    try {
+        await push(ref(db, `directChats/${currentDirectChatId}/messages`), messageData);
+        addDebugLog(`Sent direct message to ${currentDirectChatId}: "${text}"`);
+    } catch (error: any) {
+        addDebugLog(`Error sending direct message: ${error.message}`);
+        toast({ title: "Chat Error", description: "Could not send message.", variant: "destructive" });
+    }
+  }, [currentDirectChatId, sessionUser, toast, addDebugLog]);
+
 
   if (pageLoading) {
     return (
@@ -1115,27 +1204,53 @@ export default function HomePage() {
       )}
 
       {(chatState === 'dialing' || chatState === 'connecting' || chatState === 'connected') && (
-        <div className="w-full flex flex-col items-center gap-6">
-          <VideoChatPlaceholder
-            localStream={localStream} remoteStream={remoteStream}
-            isMicOn={isMicOn} isVideoOn={isVideoOn}
-            onToggleMic={toggleMic} onToggleVideo={toggleVideo}
-            chatState={chatState}
-            peerName={(peerInfo as OnlineUser)?.name || (chatState === 'dialing' ? 'Dialing...' : (chatState === 'connecting' ? 'Connecting...' : 'Peer'))}
-          />
-          <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
-            <Button onClick={() => handleEndCall(true)} size="lg" className="flex-1" variant="destructive">
-              <PhoneOff className="mr-2 h-5 w-5" /> End Call
-            </Button>
-            {chatState === 'connected' && peerInfo && (peerInfo as OnlineUser | UserProfile).id && authCurrentUser && (peerInfo as OnlineUser).isGoogleUser && (
-              <ReportDialog
-                reportedUser={{
-                  id: (peerInfo as UserProfile).id, name: (peerInfo as UserProfile).name || (peerInfo as OnlineUser).name,
-                  photoUrl: (peerInfo as UserProfile).photoUrl || (peerInfo as OnlineUser).photoUrl || '',
-                  bio: (peerInfo as UserProfile).bio || ''
-                }}
-                triggerButtonText="Report User" triggerButtonVariant="outline" triggerButtonFullWidth={true}
-              />
+        <div className="w-full flex flex-col items-center gap-4">
+          <div className="w-full max-w-2xl"> {/* Container for video and chat */}
+            <VideoChatPlaceholder
+              localStream={localStream} remoteStream={remoteStream}
+              isMicOn={isMicOn} isVideoOn={isVideoOn}
+              onToggleMic={toggleMic} onToggleVideo={toggleVideo}
+              chatState={chatState}
+              peerName={(peerInfo as OnlineUser)?.name || (chatState === 'dialing' ? 'Dialing...' : (chatState === 'connecting' ? 'Connecting...' : 'Peer'))}
+            />
+            <div className="flex flex-col sm:flex-row gap-2 mt-4 w-full">
+                <Button onClick={() => handleEndCall(true)} size="lg" className="flex-1" variant="destructive">
+                <PhoneOff className="mr-2 h-5 w-5" /> End Call
+                </Button>
+                {chatState === 'connected' && (
+                    <Button 
+                        onClick={() => setIsDirectChatPanelOpen(prev => !prev)} 
+                        size="lg" 
+                        variant="outline" 
+                        className="flex-1"
+                        aria-label="Toggle chat"
+                    >
+                        <MessageSquare className="mr-2 h-5 w-5" /> Chat
+                    </Button>
+                )}
+            </div>
+            {chatState === 'connected' && isDirectChatPanelOpen && currentDirectChatId && sessionUser && (
+                <div className="mt-4 h-[400px]"> {/* Fixed height for chat panel */}
+                    <ChatPanel
+                        messages={directChatMessages}
+                        onSendMessage={handleSendDirectMessage}
+                        currentUserId={sessionUser.id}
+                        chatRoomId={currentDirectChatId}
+                        chatTitle={`Chat with ${(peerInfo as OnlineUser)?.name || 'Peer'}`}
+                    />
+                </div>
+            )}
+             {chatState === 'connected' && peerInfo && (peerInfo as OnlineUser | UserProfile).id && authCurrentUser && (peerInfo as OnlineUser).isGoogleUser && (
+              <div className="mt-4 w-full">
+                <ReportDialog
+                    reportedUser={{
+                    id: (peerInfo as UserProfile).id, name: (peerInfo as UserProfile).name || (peerInfo as OnlineUser).name,
+                    photoUrl: (peerInfo as UserProfile).photoUrl || (peerInfo as OnlineUser).photoUrl || '',
+                    bio: (peerInfo as UserProfile).bio || ''
+                    }}
+                    triggerButtonText="Report User" triggerButtonVariant="outline" triggerButtonFullWidth={true}
+                />
+              </div>
             )}
           </div>
         </div>
@@ -1187,6 +1302,3 @@ export default function HomePage() {
     </MainLayout>
   );
 }
-
-
-    
