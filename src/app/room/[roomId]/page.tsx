@@ -137,20 +137,41 @@ export default function RoomPage() {
     const pc = peerConnectionsRef.current.get(peerId);
     if (pc) {
       pc.ontrack = null; pc.onicecandidate = null; pc.oniceconnectionstatechange = null; pc.onsignalingstatechange = null;
+      
       pc.getSenders().forEach(sender => {
-        if (sender.track) sender.track.stop();
-        try { if(pc.signalingState !== 'closed') pc.removeTrack(sender); } catch (e) { addDebugLog(`Error removing track for ${peerId}: ${e}`);}
+        // DO NOT call sender.track.stop() here as the localStream track is shared.
+        // Only remove the track from this specific peer connection.
+        if (sender.track && pc.signalingState !== 'closed') {
+          try { 
+            pc.removeTrack(sender);
+            addDebugLog(`Removed track ${sender.track.kind} from sender for peer ${peerId}`);
+          } catch (e) { 
+            addDebugLog(`Error removing track for ${peerId} from sender: ${e}`);
+          }
+        }
       });
-      if (pc.signalingState !== 'closed') pc.close();
+
+      if (pc.signalingState !== 'closed') {
+        pc.close();
+        addDebugLog(`Closed peer connection for ${peerId}`);
+      }
       peerConnectionsRef.current.delete(peerId);
     }
     setRemoteStreams(prev => { const newStreams = new Map(prev); newStreams.delete(peerId); return newStreams; });
+    addDebugLog(`Peer connection for ${peerId} fully cleaned from refs and state.`);
   }, [addDebugLog]);
 
   const handleLeaveRoom = useCallback(async () => {
     addDebugLog(`Leaving room ${roomId}. Current user: ${sessionUser?.id}`);
     setIsInRoom(false);
-    if (localStream) { localStream.getTracks().forEach(track => track.stop()); setLocalStream(null); addDebugLog("Local stream stopped."); }
+    if (localStream) { 
+      localStream.getTracks().forEach(track => {
+        track.stop();
+        addDebugLog(`Stopped local track: ${track.kind} (${track.id})`);
+      }); 
+      setLocalStream(null); 
+      addDebugLog("Local stream stopped and nulled."); 
+    }
     peerConnectionsRef.current.forEach((_, peerId) => { addDebugLog(`Cleaning up PC for ${peerId} during leave room.`); cleanupPeerConnection(peerId); });
     peerConnectionsRef.current.clear();
     setRemoteStreams(new Map());
@@ -307,7 +328,7 @@ export default function RoomPage() {
   const copyRoomLinkToClipboard = () => { const link = window.location.href; navigator.clipboard.writeText(link).then(() => toast({ title: "Link Copied!", description: "Room link copied to clipboard." })).catch(err => toast({ title: "Copy Failed", description: "Could not copy link.", variant: "destructive" })); };
   
   const calculateGridStyle = (participantCount: number): React.CSSProperties => {
-    if (participantCount <= 0) participantCount = 1; // Ensure at least 1 for calculation if local stream is counted
+    if (participantCount <= 0) participantCount = 1; 
     let cols = 1;
     if (participantCount === 2) cols = 2;
     else if (participantCount <= 4) cols = 2;
