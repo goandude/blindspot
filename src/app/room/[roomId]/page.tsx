@@ -7,13 +7,13 @@ import { MainLayout } from '@/components/layout/main-layout';
 import { Button } from '@/components/ui/button';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { useAuth } from '@/hooks/use-auth';
-import { db } from '@/lib/firebase'; // storage will be imported if needed for files
+import { db } from '@/lib/firebase';
 import { ref, set, onValue, off, remove, serverTimestamp, type DatabaseReference, push, child, query, limitToLast, orderByKey, type Query as FirebaseQuery } from 'firebase/database';
-import type { OnlineUser, UserProfile, RoomSignal, ChatMessage } from '@/types'; // Added ChatMessage
-import { Video as VideoIcon, Mic, MicOff, VideoOff as VideoOffIcon, PhoneOff, Users as UsersIcon, LogOut, Copy, AlertTriangle, MessageSquare } from 'lucide-react'; // Added MessageSquare
+import type { OnlineUser, UserProfile, RoomSignal, ChatMessage } from '@/types';
+import { Video as VideoIcon, Mic, MicOff, VideoOff as VideoOffIcon, PhoneOff, Users as UsersIcon, LogOut, Copy, AlertTriangle, MessageSquare } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
-import { ChatPanel } from '@/components/features/chat/chat-panel'; // Import ChatPanel
+import { ChatPanel } from '@/components/features/chat/chat-panel';
 import { cn } from '@/lib/utils';
 
 
@@ -42,33 +42,62 @@ export default function RoomPage() {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStreamEntry>>(new Map());
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
-  const [participants, setParticipants] = useState<OnlineUser[]>([]);
-  const participantsRef = useRef(participants); 
+  
+  const [_participants, _setParticipantsInternal] = useState<OnlineUser[]>([]);
+  const participantsRef = useRef<OnlineUser[]>([]); // Stores the "previous" list for comparison
+
 
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [isInRoom, setIsInRoom] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [isChatPanelOpen, setIsChatPanelOpen] = useState(false); // State for chat panel
-  const [conferenceChatMessages, setConferenceChatMessages] = useState<ChatMessage[]>([]); // State for chat messages
+  const [isChatPanelOpen, setIsChatPanelOpen] = useState(false);
+  const [conferenceChatMessages, setConferenceChatMessages] = useState<ChatMessage[]>([]);
 
   const firebaseListeners = useRef<Map<string, { ref: DatabaseReference | FirebaseQuery, callback: (snapshot: any) => void, eventType: string }>>(new Map());
   const CHAT_PANEL_WIDTH_CLASS = "max-w-sm sm:max-w-md"; 
   
-  useEffect(() => {
-    participantsRef.current = participants;
-  }, [participants]);
-
   const addDebugLog = useCallback((message: string) => {
     // console.log(`[Room DEBUG] ${roomId?.substring(0,4) || 'N/A'} - ${sessionUser?.id?.substring(0,4) || 'N/A'} - ${message}`);
   }, []); 
+
+  const setParticipants = useCallback((newParticipantsData: OnlineUser[] | ((prev: OnlineUser[]) => OnlineUser[])) => {
+    _setParticipantsInternal(prevParticipantsList => {
+        const updatedParticipantsList = typeof newParticipantsData === 'function' 
+            ? newParticipantsData(prevParticipantsList) 
+            : newParticipantsData;
+
+        const currentSUserId = sessionUser?.id;
+        if (participantsRef.current.length > 0 && currentSUserId) { // Only compare if previous list was populated
+            const previousUserIds = new Set(participantsRef.current.map(p => p.id));
+            const currentUserIds = new Set(updatedParticipantsList.map(p => p.id));
+
+            previousUserIds.forEach(id => {
+                if (!currentUserIds.has(id) && id !== currentSUserId) {
+                    const departedUser = participantsRef.current.find(p => p.id === id);
+                    if (departedUser) {
+                        toast({
+                            title: "User Left",
+                            description: `${departedUser.name} has left the room.`,
+                            variant: "default",
+                        });
+                        addDebugLog(`User Left Toast: ${departedUser.name} (${id})`);
+                    }
+                }
+            });
+        }
+        participantsRef.current = [...updatedParticipantsList]; // Update ref with the new list
+        return updatedParticipantsList;
+    });
+  }, [sessionUser?.id, toast, addDebugLog]);
+
 
   const addFirebaseDbListener = useCallback((
     dbQueryOrRef: DatabaseReference | FirebaseQuery | undefined,
     callback: (snapshot: any) => void,
     eventType: 'value' | 'child_added' | 'child_changed' | 'child_removed' = 'value'
   ) => {
-    if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function' || typeof (dbQueryOrRef as DatabaseReference).root?.toString !== 'function') {
+    if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function' || (dbQueryOrRef.constructor.name !== 'QueryImpl' && typeof (dbQueryOrRef as DatabaseReference).root?.toString !== 'function') ) {
       addDebugLog(`WARN: addFirebaseDbListener called with invalid or incomplete dbQueryOrRef. PathKey cannot be reliably generated.`);
       console.warn("addFirebaseDbListener: Invalid/incomplete dbQueryOrRef passed", {dbQueryOrRef});
       return;
@@ -105,7 +134,7 @@ export default function RoomPage() {
     dbQueryOrRef: DatabaseReference | FirebaseQuery | undefined,
     eventType: 'value' | 'child_added' | 'child_changed' | 'child_removed' = 'value'
   ) => {
-    if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function' || typeof (dbQueryOrRef as DatabaseReference).root?.toString !== 'function') {
+    if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function' || (dbQueryOrRef.constructor.name !== 'QueryImpl' && typeof (dbQueryOrRef as DatabaseReference).root?.toString !== 'function') ) {
       addDebugLog(`WARN: removeFirebaseDbListener called with invalid or incomplete dbQueryOrRef. PathKey cannot be reliably generated.`);
       console.warn("removeFirebaseDbListener: Invalid/incomplete dbQueryOrRef passed", {dbQueryOrRef});
       return;
@@ -233,12 +262,13 @@ export default function RoomPage() {
         }
     });
     firebaseListeners.current.clear();
-    setParticipants([]);
+    setParticipants([]); // Reset participants state
+    participantsRef.current = []; // Reset participants ref
     setConferenceChatMessages([]);
-    setIsChatPanelOpen(false); // Close chat panel on leave
+    setIsChatPanelOpen(false);
     toast({ title: "Left Room", description: "You have left the conference room." });
     router.push('/');
-  }, [roomId, sessionUser, localStream, cleanupPeerConnection, addDebugLog, toast, router]);
+  }, [roomId, sessionUser, localStream, cleanupPeerConnection, addDebugLog, toast, router, setParticipants]);
 
   const initializeAndSendOffer = useCallback(async (peerId: string, peerName?: string) => {
     if (!localStream || !roomId || !sessionUser?.id || peerConnectionsRef.current.has(peerId)) {
@@ -259,9 +289,9 @@ export default function RoomPage() {
     };
 
     pc.ontrack = event => {
-      addDebugLog(`Caller: Ontrack from ${peerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}.`);
-      setRemoteStreams(prev => {
-        const newMap = new Map(prev);
+      addDebugLog(`Caller: Ontrack from ${peerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}. Streams: ${event.streams.length}`);
+      setRemoteStreams(prevMap => {
+        const newMap = new Map(prevMap);
         let entry = newMap.get(peerId);
         let stream: MediaStream;
         
@@ -269,11 +299,12 @@ export default function RoomPage() {
           stream = entry.stream;
           if (!stream.getTrackById(event.track.id)) {
             stream.addTrack(event.track);
-            addDebugLog(`Caller: Added track ${event.track.kind} to existing stream for ${peerId}. Stream tracks: ${stream.getTracks().length}`);
+            addDebugLog(`Caller: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${peerId}. Stream tracks: ${stream.getTracks().map(t=>t.id).join()}`);
           }
         } else {
-          stream = new MediaStream([event.track]);
-          addDebugLog(`Caller: Created new stream with track ${event.track.kind} for ${peerId}. Stream tracks: ${stream.getTracks().length}`);
+          stream = new MediaStream(); // Create empty stream first
+          stream.addTrack(event.track); // Then add track
+          addDebugLog(`Caller: Created new stream with track ${event.track.kind} (${event.track.id}) for ${peerId}. Stream tracks: ${stream.getTracks().map(t=>t.id).join()}`);
         }
         const participantInfo = participantsRef.current.find(p => p.id === peerId);
         newMap.set(peerId, { stream, userInfo: participantInfo });
@@ -318,25 +349,26 @@ export default function RoomPage() {
           pc.onicecandidate = event => { if (event.candidate && roomId && sessionUser?.id) { addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`); const candidatePayload: RoomSignal = { type: 'candidate', senderId: sessionUser.id!, senderName: sessionUser.name, data: event.candidate.toJSON() }; set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`)); }};
           
           pc.ontrack = event => {
-            addDebugLog(`Callee: Ontrack from ${senderId}. Track kind: ${event.track.kind}, ID: ${event.track.id}.`);
-            setRemoteStreams(prev => {
-              const newMap = new Map(prev);
-              let entry = newMap.get(senderId);
-              let stream: MediaStream;
+            addDebugLog(`Callee: Ontrack from ${senderId}. Track kind: ${event.track.kind}, ID: ${event.track.id}. Streams: ${event.streams.length}`);
+             setRemoteStreams(prevMap => {
+                const newMap = new Map(prevMap);
+                let entry = newMap.get(senderId);
+                let stream: MediaStream;
 
-              if (entry) {
-                stream = entry.stream;
-                if (!stream.getTrackById(event.track.id)) {
-                  stream.addTrack(event.track);
-                  addDebugLog(`Callee: Added track ${event.track.kind} to existing stream for ${senderId}. Stream tracks: ${stream.getTracks().length}`);
+                if (entry) {
+                    stream = entry.stream;
+                    if (!stream.getTrackById(event.track.id)) {
+                        stream.addTrack(event.track);
+                        addDebugLog(`Callee: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${senderId}. Stream tracks: ${stream.getTracks().map(t=>t.id).join()}`);
+                    }
+                } else {
+                    stream = new MediaStream(); // Create empty stream first
+                    stream.addTrack(event.track); // Then add track
+                    addDebugLog(`Callee: Created new stream with track ${event.track.kind} (${event.track.id}) for ${senderId}. Stream tracks: ${stream.getTracks().map(t=>t.id).join()}`);
                 }
-              } else {
-                stream = new MediaStream([event.track]);
-                addDebugLog(`Callee: Created new stream with track ${event.track.kind} for ${senderId}. Stream tracks: ${stream.getTracks().length}`);
-              }
-              const participantInfo = participantsRef.current.find(p => p.id === senderId);
-              newMap.set(senderId, { stream, userInfo: participantInfo });
-              return newMap;
+                const participantInfo = participantsRef.current.find(p => p.id === senderId);
+                newMap.set(senderId, { stream, userInfo: participantInfo });
+                return newMap;
             });
           };
 
@@ -368,13 +400,34 @@ export default function RoomPage() {
     addFirebaseDbListener(mySignalsDbRef, signalsCallback, 'value');
     
     const participantsDbRef = ref(db, `conferenceRooms/${roomId}/participants`);
-    const participantsCallback = (snapshot: any) => {
-      const newParticipantsList: OnlineUser[] = []; snapshot.forEach((childSnapshot: any) => { newParticipantsList.push({ id: childSnapshot.key!, ...childSnapshot.val() } as OnlineUser); });
-      setParticipants(newParticipantsList); addDebugLog(`Participants updated: ${newParticipantsList.map(p => `${p.name}(${p.id.substring(0,4)})`).join(', ')} (${newParticipantsList.length} total)`);
-      newParticipantsList.forEach(p => { if (p.id !== sessionUser.id && !peerConnectionsRef.current.has(p.id) && localStream) { addDebugLog(`New participant ${p.name} (${p.id}) detected. Initializing connection.`); initializeAndSendOffer(p.id, p.name); }});
-      peerConnectionsRef.current.forEach((_, pcPeerId) => { if (!newParticipantsList.find(p => p.id === pcPeerId)) { addDebugLog(`Participant ${pcPeerId} left. Cleaning up their connection.`); cleanupPeerConnection(pcPeerId); }});
+    const participantsCb = (snapshot: any) => {
+      const newParticipantsListFromDb: OnlineUser[] = []; 
+      snapshot.forEach((childSnapshot: any) => { 
+        newParticipantsListFromDb.push({ id: childSnapshot.key!, ...childSnapshot.val() } as OnlineUser); 
+      });
+      
+      setParticipants(newParticipantsListFromDb); // This will trigger comparison and toasts via the custom setter
+
+      addDebugLog(`Participants updated (from DB): ${newParticipantsListFromDb.map(p => `${p.name}(${p.id.substring(0,4)})`).join(', ')} (${newParticipantsListFromDb.length} total)`);
+      
+      const currentSUserId = sessionUser?.id; // Re-check sessionUser.id
+      if (currentSUserId && localStream) {
+        newParticipantsListFromDb.forEach(p => { 
+          if (p.id !== currentSUserId && !peerConnectionsRef.current.has(p.id)) { 
+            addDebugLog(`New participant ${p.name} (${p.id}) detected via DB. Initializing connection.`); 
+            initializeAndSendOffer(p.id, p.name); 
+          }
+        });
+      }
+
+      peerConnectionsRef.current.forEach((_, pcPeerId) => { 
+        if (!newParticipantsListFromDb.find(p => p.id === pcPeerId)) { 
+          addDebugLog(`Participant ${pcPeerId} no longer in DB list. Cleaning up their connection.`); 
+          cleanupPeerConnection(pcPeerId); 
+        }
+      });
     };
-    addFirebaseDbListener(participantsDbRef, participantsCallback, 'value');
+    addFirebaseDbListener(participantsDbRef, participantsCb, 'value');
 
     const chatMessagesQuery = query(ref(db, `conferenceRooms/${roomId}/chatMessages`), orderByKey(), limitToLast(50));
     const chatMessagesCallback = (snapshot: any) => {
@@ -393,7 +446,7 @@ export default function RoomPage() {
       removeFirebaseDbListener(participantsDbRef, 'value');
       removeFirebaseDbListener(chatMessagesQuery, 'value');
     };
-  }, [isInRoom, roomId, sessionUser, localStream, initializeAndSendOffer, cleanupPeerConnection, addDebugLog, addFirebaseDbListener, removeFirebaseDbListener]);
+  }, [isInRoom, roomId, sessionUser, localStream, initializeAndSendOffer, cleanupPeerConnection, addDebugLog, addFirebaseDbListener, removeFirebaseDbListener, setParticipants]);
 
   const handleJoinRoom = async () => {
     if (!sessionUser || !sessionUser.id || !roomId) { toast({ title: "Error", description: "Session, User ID, or Room ID missing.", variant: "destructive" }); addDebugLog("JoinRoom: sessionUser, sessionUser.id, or roomId missing."); return; }
@@ -456,14 +509,26 @@ export default function RoomPage() {
 
   const VideoFeed = ({ stream, user, isLocal, isVideoActuallyOn, addDebugLogProp }: { stream: MediaStream; user?: OnlineUser | null; isLocal?: boolean; isVideoActuallyOn: boolean; addDebugLogProp: (log: string) => void; }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
+    
     useEffect(() => { 
-      if (videoRef.current && stream) { 
-        videoRef.current.srcObject = stream; 
+      let videoElement = videoRef.current;
+      if (videoElement && stream) { 
+        videoElement.srcObject = stream; 
         addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject set. Stream has ${stream.getTracks().length} tracks (video: ${stream.getVideoTracks().length}, audio: ${stream.getAudioTracks().length}). Video on: ${isVideoActuallyOn}`);
       } else if (!stream) {
         addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}: stream is null.`);
+        if (videoElement) {
+            videoElement.srcObject = null; 
+        }
       }
+      return () => {
+        if (videoElement) {
+            videoElement.srcObject = null;
+            addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject nulled on cleanup.`);
+        }
+      };
     }, [stream, user, isLocal, isVideoActuallyOn, addDebugLogProp]);
+
     const FallbackAvatar = () => (<Avatar className="w-12 h-12 sm:w-16 sm:h-16 border-2 border-gray-700"><AvatarImage src={user?.photoUrl} alt={user?.name || 'User'} data-ai-hint={user?.dataAiHint || "avatar abstract"} /><AvatarFallback className="bg-gray-600 text-white">{user?.name ? user.name.charAt(0).toUpperCase() : <UsersIcon />}</AvatarFallback></Avatar>);
     return (
       <div className="relative w-full aspect-video bg-gray-800 rounded-lg overflow-hidden shadow-md flex items-center justify-center">
@@ -486,9 +551,7 @@ export default function RoomPage() {
   return (
     <MainLayout fullscreen>
       <div className="flex h-screen bg-black text-white">
-        {/* Main content area: Video Grid + Controls */}
         <div className="relative flex-grow flex flex-col overflow-hidden">
-            {/* Video Grid Area */}
             <div 
               className="flex-grow p-1 sm:p-2 md:p-4 grid gap-1 sm:gap-2 md:gap-4 items-start justify-center overflow-auto"
               style={calculateGridStyle(totalStreamsToDisplay > 0 ? totalStreamsToDisplay : 1)}
@@ -508,11 +571,10 @@ export default function RoomPage() {
                 </div>
               )}
             </div>
-             {/* Controls Bar - absolutely positioned at the bottom of the video grid container */}
             {isInRoom && (
               <div className="absolute bottom-0 left-0 right-0 p-2 sm:p-3 bg-black/75 flex justify-between items-center z-10 shadow-lg">
                 <div className="text-xs sm:text-sm text-gray-300 hidden md:block">
-                  Room: {roomId?.substring(0,6)}... ({participants.length})
+                  Room: {roomId?.substring(0,6)}... ({_participants.length})
                 </div>
                 <div className="flex-grow flex justify-center gap-2 sm:gap-3">
                   <Button variant="ghost" size="icon" onClick={toggleMic} disabled={!localStream} className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12">
@@ -543,13 +605,12 @@ export default function RoomPage() {
             )}
         </div>
 
-        {/* Chat Panel - fixed width, slides in/out */}
         {isInRoom && (
           <div className={cn(
             "h-full bg-gray-900/80 backdrop-blur-sm shadow-2xl transition-all duration-300 ease-in-out z-20 flex-shrink-0",
             isChatPanelOpen ? `w-full ${CHAT_PANEL_WIDTH_CLASS}` : "w-0" 
           )}>
-            {isChatPanelOpen && roomId && sessionUser && ( // Only render ChatPanel when open
+            {isChatPanelOpen && roomId && sessionUser && ( 
                  <ChatPanel
                     messages={conferenceChatMessages}
                     onSendMessage={handleSendConferenceMessage}
