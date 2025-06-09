@@ -7,10 +7,10 @@ import { VideoChatPlaceholder } from '@/components/features/chat/video-chat-plac
 import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { ProfileSetupDialog } from '@/components/features/profile/profile-setup-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
-import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile, ChatMessage } from '@/types'; // Added ChatMessage
+import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile, ChatMessage, RoomSignal } from '@/types'; // Added ChatMessage, RoomSignal
 import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff, Link2, Users as UsersIcon, MessageSquare } from 'lucide-react'; // Added MessageSquare
 import { db } from '@/lib/firebase'; // storage might be needed later
-import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get, query, limitToLast, orderByKey } from 'firebase/database';
+import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get, query, limitToLast, orderByKey, type Query as FirebaseQuery } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { OnlineUsersPanel } from '@/components/features/online-users/online-users-panel';
@@ -86,7 +86,7 @@ export default function HomePage() {
   const isCallerRef = useRef<boolean>(false);
   const ringingAudioRef = useRef<HTMLAudioElement | null>(null);
 
-  const firebaseListeners = useRef<Map<string, { ref: DatabaseReference | ReturnType<typeof query>, callback: (snapshot: any) => void, eventType: string }>>(new Map());
+  const firebaseListeners = useRef<Map<string, { ref: DatabaseReference | FirebaseQuery, callback: (snapshot: any) => void, eventType: string }>>(new Map());
   const chatStateRef = useRef<ChatState>(chatState);
   const currentSessionUserIdRef = useRef<string | null>(null);
   const isPageVisibleRef = useRef<boolean>(true);
@@ -110,7 +110,7 @@ export default function HomePage() {
 
   // Effect to manage session user based on auth state
   useEffect(() => {
-    addDebugLog(`Auth state update: authLoading=${authLoading}, authProfileLoading=${authProfileLoading}, authCurrentUser=${authCurrentUser?.uid}, isProfileSetupNeeded=${isProfileSetupNeeded}, anonymousSessionId=${anonymousSessionId}`);
+    addDebugLog(`Auth state update: authLoading=${authLoading}, authProfileLoading=${authProfileLoading}, authCurrentUser=${authCurrentUser?.uid}, isProfileSetupNeeded=${isProfileSetupNeeded}, current anonIdState=${anonymousSessionId}`);
 
     if (authLoading) {
       addDebugLog("Auth state is loading (authLoading=true), page remains in loading state.");
@@ -133,32 +133,34 @@ export default function HomePage() {
         addDebugLog(`Active session user (Google): ${googleSessionUser.name} (${googleSessionUser.id})`);
         setPageLoading(false);
         if (anonymousSessionId) {
-            addDebugLog(`Clearing anonymousSessionId (${anonymousSessionId}) as Google user is active.`);
-            setAnonymousSessionId(null);
+            addDebugLog(`Clearing anonymousSessionId state (${anonymousSessionId}) as Google user is active.`);
+            setAnonymousSessionId(null); // Clear any anon ID if Google user is active
         }
       } else if (isProfileSetupNeeded) {
         addDebugLog(`Google user ${authCurrentUser.uid} authenticated, but profile setup is needed. Page loading false, ProfileSetupDialog should show.`);
         setPageLoading(false);
         if (anonymousSessionId) {
-            addDebugLog(`Clearing anonymousSessionId (${anonymousSessionId}) as Google user profile setup is needed.`);
-            setAnonymousSessionId(null);
+            addDebugLog(`Clearing anonymousSessionId state (${anonymousSessionId}) as Google user profile setup is needed.`);
+            setAnonymousSessionId(null); // Clear any anon ID
         }
       } else {
         addDebugLog(`WARN: authCurrentUser exists but authUserProfile is null and profile not loading/setup needed. User: ${authCurrentUser.uid}. This might indicate an issue with profile creation/fetching logic in useAuth.`);
         setPageLoading(false);
       }
     } else { // No Google user (authLoading is false) -> This implies anonymous user path
-      if (!anonymousSessionId) {
+      const currentAnonIdInState = anonymousSessionId;
+      if (!currentAnonIdInState) { // If no anon ID in state yet
         const newAnonId = generateAnonymousSessionId();
-        addDebugLog(`Generated new anonymous session ID (auth confirmed no Google user): ${newAnonId}.`);
-        setAnonymousSessionId(newAnonId);
+        addDebugLog(`Generated new anonymous session ID (auth confirmed no Google user): ${newAnonId}. Setting in state.`);
+        setAnonymousSessionId(newAnonId); // This will trigger re-run of this effect.
         setPageLoading(true); // Set loading true while we fetch country for new anon user
-        return;
+        return; // Return here, effect will re-run with newAnonId in state
       }
       
-      addDebugLog(`No Google user. Using anonymous session ID: ${anonymousSessionId}.`);
+      // At this point, anonymousSessionId (from state) should be set
+      addDebugLog(`No Google user. Using anonymous session ID from state: ${currentAnonIdInState}.`);
       const fetchCountryAndSetAnonymousUser = async () => {
-        addDebugLog(`Fetching country for anonymous user ${anonymousSessionId}.`);
+        addDebugLog(`Fetching country for anonymous user ${currentAnonIdInState}.`);
         let countryCode = 'XX';
         try {
           const response = await fetch('https://ipapi.co/country_code/');
@@ -166,18 +168,19 @@ export default function HomePage() {
           else addDebugLog(`Failed to fetch country for anon user: ${response.status}`);
         } catch (e: any) { addDebugLog(`WARN: Error fetching country for anonymous user: ${e.message || e}`); }
         const anonUser: OnlineUser = {
-          id: anonymousSessionId, name: `User-${anonymousSessionId.substring(0, 4)}`,
-          photoUrl: `https://placehold.co/96x96.png?text=${anonymousSessionId.charAt(0).toUpperCase()}`,
+          id: currentAnonIdInState, name: `User-${currentAnonIdInState.substring(0, 4)}`,
+          photoUrl: `https://placehold.co/96x96.png?text=${currentAnonIdInState.charAt(0).toUpperCase()}`,
           dataAiHint: 'abstract character', countryCode: countryCode, isGoogleUser: false,
         };
-        setSessionUser(anonUser); currentSessionUserIdRef.current = anonymousSessionId;
+        setSessionUser(anonUser); currentSessionUserIdRef.current = currentAnonIdInState;
         addDebugLog(`Anonymous session user created: ${anonUser.name} (${anonUser.id}) with country ${anonUser.countryCode}`);
         setPageLoading(false);
       };
       
-      if (anonymousSessionId && (!sessionUser || sessionUser.id !== anonymousSessionId)) {
+      if (currentAnonIdInState && (!sessionUser || sessionUser.id !== currentAnonIdInState)) {
           fetchCountryAndSetAnonymousUser();
-      } else if (sessionUser && sessionUser.id === anonymousSessionId) {
+      } else if (sessionUser && sessionUser.id === currentAnonIdInState) {
+          addDebugLog(`Anonymous user ${currentAnonIdInState} already set up.`);
           setPageLoading(false); // Already set up this anonymous user
       }
     }
@@ -205,43 +208,82 @@ export default function HomePage() {
     }
   }, [addDebugLog]);
 
-  const removeFirebaseListener = useCallback((path: string) => {
-    const listenerEntry = firebaseListeners.current.get(path);
+  const removeFirebaseListener = useCallback((
+    dbQueryOrRef: DatabaseReference | FirebaseQuery | undefined | string, // Allow string for path-based removal
+    eventType: 'value' | 'child_added' | 'child_changed' | 'child_removed' = 'value'
+  ) => {
+    let pathKey: string;
+    let listenerEntry: { ref: DatabaseReference | FirebaseQuery, callback: (snapshot: any) => void, eventType: string } | undefined;
+
+    if (typeof dbQueryOrRef === 'string') {
+        pathKey = dbQueryOrRef + eventType; // Path-based removal (legacy, try to avoid if ref object is available)
+        listenerEntry = firebaseListeners.current.get(pathKey);
+         addDebugLog(`Attempting to remove listener by pathKey: ${pathKey}`);
+    } else if (dbQueryOrRef && typeof dbQueryOrRef.toString === 'function' && typeof (dbQueryOrRef as DatabaseReference).root?.toString === 'function') {
+        const path = (dbQueryOrRef as DatabaseReference).toString().substring((dbQueryOrRef as DatabaseReference).root.toString().length - 1);
+        pathKey = path + eventType;
+        listenerEntry = firebaseListeners.current.get(pathKey);
+        addDebugLog(`Attempting to remove listener by ref object, generated pathKey: ${pathKey}`);
+    } else {
+        addDebugLog(`WARN: removeFirebaseListener called with invalid or incomplete dbQueryOrRef. Cannot generate pathKey.`);
+        console.warn("removeFirebaseListener: Invalid dbQueryOrRef passed", {dbQueryOrRef});
+        return;
+    }
+  
     if (listenerEntry) {
-      try {
-        off(listenerEntry.ref, listenerEntry.eventType as any, listenerEntry.callback); // Cast for Query compatibility
-        addDebugLog(`Successfully removed Firebase listener for path: ${path} (type: ${listenerEntry.eventType})`);
-      } catch (error: any) {
-        addDebugLog(`WARN: Error unsubscribing Firebase listener for path ${path} (type: ${listenerEntry.eventType}): ${error.message || error}`);
-      }
-      firebaseListeners.current.delete(path);
+        try {
+            off(listenerEntry.ref, listenerEntry.eventType as any, listenerEntry.callback);
+            firebaseListeners.current.delete(pathKey);
+            addDebugLog(`Successfully removed Firebase listener for pathKey: ${pathKey}`);
+        } catch (error: any) {
+            addDebugLog(`WARN: Error unsubscribing Firebase listener for pathKey ${pathKey}: ${error.message || error}`);
+        }
+    } else {
+        addDebugLog(`No listener entry found for pathKey ${pathKey} to remove.`);
     }
   }, [addDebugLog]);
-
-  const addFirebaseListener = useCallback((dbQueryOrRef: DatabaseReference | ReturnType<typeof query>, listenerFunc: (snapshot: any) => void, eventType: string = 'value') => {
-    const path = dbQueryOrRef.toString().substring(dbQueryOrRef.root.toString().length -1);
-    if (firebaseListeners.current.has(path)) {
-      addDebugLog(`Listener for path ${path} (type: ${eventType}) already exists. Removing old one first.`);
-      removeFirebaseListener(path);
+  
+  const addFirebaseListener = useCallback((
+    dbQueryOrRef: DatabaseReference | FirebaseQuery | undefined,
+    listenerFunc: (snapshot: any) => void,
+    eventType: 'value' | 'child_added' | 'child_changed' | 'child_removed' = 'value'
+  ) => {
+    if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function' || typeof (dbQueryOrRef as DatabaseReference).root?.toString !== 'function') {
+      addDebugLog(`WARN: addFirebaseListener called with invalid or incomplete dbQueryOrRef. Cannot generate pathKey.`);
+      console.warn("addFirebaseListener: Invalid dbQueryOrRef passed", {dbQueryOrRef});
+      return;
     }
+  
+    const path = (dbQueryOrRef as DatabaseReference).toString().substring((dbQueryOrRef as DatabaseReference).root.toString().length - 1);
+    const pathKey = path + eventType;
+  
+    if (firebaseListeners.current.has(pathKey)) {
+      addDebugLog(`Listener for pathKey ${pathKey} already exists. Removing old one first.`);
+      const oldEntry = firebaseListeners.current.get(pathKey);
+      if (oldEntry) {
+        off(oldEntry.ref, oldEntry.eventType as any, oldEntry.callback);
+      }
+    }
+    
     const actualCallback = (snapshot: any) => listenerFunc(snapshot);
     
-    onValue(dbQueryOrRef, actualCallback, (error) => { // @ts-ignore - onValue can take Query
+    onValue(dbQueryOrRef, actualCallback, (error: Error) => { 
       addDebugLog(`ERROR reading from ${path} (event: ${eventType}): ${error.message}`);
       toast({ title: "Firebase Error", description: `Failed to listen to ${path}. Check console.`, variant: "destructive" });
     });
-    firebaseListeners.current.set(path, { ref: dbQueryOrRef, callback: actualCallback, eventType });
-    addDebugLog(`Added Firebase listener for path: ${path} with eventType: ${eventType}`);
-  }, [addDebugLog, toast, removeFirebaseListener]);
+  
+    firebaseListeners.current.set(pathKey, { ref: dbQueryOrRef, callback: actualCallback, eventType });
+    addDebugLog(`Added Firebase listener for pathKey: ${pathKey}`);
+  }, [addDebugLog, toast]); // removeFirebaseListener removed from deps as it causes cycles
 
   const cleanupAllFirebaseListeners = useCallback(() => {
     addDebugLog(`Cleaning up ALL (${firebaseListeners.current.size}) Firebase listeners.`);
-    firebaseListeners.current.forEach((listenerEntry, path) => {
+    firebaseListeners.current.forEach((listenerEntry, pathKey) => {
       try {
         off(listenerEntry.ref, listenerEntry.eventType as any, listenerEntry.callback);
-        addDebugLog(`Cleaned up listener for ${path} (type: ${listenerEntry.eventType})`);
+        addDebugLog(`Cleaned up listener for pathKey ${pathKey}`);
       } catch (error: any) {
-        addDebugLog(`WARN: Error unsubscribing Firebase listener during general cleanup for path: ${path} - ${error.message || error}`);
+        addDebugLog(`WARN: Error unsubscribing Firebase listener during general cleanup for pathKey: ${pathKey} - ${error.message || error}`);
       }
     });
     firebaseListeners.current.clear();
@@ -306,9 +348,9 @@ export default function HomePage() {
 
     cleanupWebRTC();
     if (currentRoomIdVal) {
-      removeFirebaseListener(`callSignals/${currentRoomIdVal}/answer`);
-      if (currentPeerIdVal) removeFirebaseListener(`iceCandidates/${currentRoomIdVal}/${currentPeerIdVal}`);
-      if (myCurrentId) removeFirebaseListener(`iceCandidates/${currentRoomIdVal}/${myCurrentId}`);
+      removeFirebaseListener(ref(db, `callSignals/${currentRoomIdVal}/answer`), 'value');
+      if (currentPeerIdVal) removeFirebaseListener(ref(db, `iceCandidates/${currentRoomIdVal}/${currentPeerIdVal}`), 'value');
+      if (myCurrentId) removeFirebaseListener(ref(db, `iceCandidates/${currentRoomIdVal}/${myCurrentId}`), 'value');
     }
 
     await cleanupCallData();
@@ -511,7 +553,7 @@ export default function HomePage() {
             addDebugLog(`ERROR: Caller: setting remote desc (answer) for room ${new1to1RoomId}: ${e.message || e}. PC State: ${peerConnectionRef.current.signalingState}`);
             handleEndCall(false); return;
           }
-          removeFirebaseListener(answerDbRefPath);
+          removeFirebaseListener(ref(db, answerDbRefPath), 'value');
           remove(ref(db, answerDbRefPath)).catch(e => addDebugLog(`WARN: Error removing answer from ${answerDbRefPath}: ${e.message || e}`));
         } else if (snapshot.exists() && (!peerConnectionRef.current || peerConnectionRef.current.signalingState === 'closed')) {
           addDebugLog(`Caller: Received answer for room ${new1to1RoomId}, but peer connection is null or closed. Ignoring.`);
@@ -732,7 +774,7 @@ export default function HomePage() {
     addFirebaseListener(connectedDbRef, presenceCb, 'value');
     return () => {
       addDebugLog(`Anonymous Presence (connection): Cleaning up for ${myId}. Detaching .info/connected listener.`);
-      removeFirebaseListener(connectedDbRef.toString().substring(connectedDbRef.root.toString().length-1));
+      removeFirebaseListener(connectedDbRef, 'value');
       // No need to explicitly remove user here, as onDisconnect in updateUserOnlineStatus should handle it if it was set
     };
   }, [authCurrentUser, anonymousSessionId, sessionUser, addFirebaseListener, removeFirebaseListener, addDebugLog, isManuallyOnline, updateUserOnlineStatus]);
@@ -756,7 +798,7 @@ export default function HomePage() {
       setOnlineUsers(userList.filter(u => u.id !== activeUserId));
     };
     addFirebaseListener(onlineUsersDbRef, onlineUsersCb, 'value');
-    return () => removeFirebaseListener(onlineUsersDbRef.toString().substring(onlineUsersDbRef.root.toString().length-1));
+    return () => removeFirebaseListener(onlineUsersDbRef, 'value');
   }, [addFirebaseListener, removeFirebaseListener, addDebugLog]);
 
   useEffect(() => {
@@ -824,7 +866,7 @@ export default function HomePage() {
     addFirebaseListener(incomingCallDbRef, incomingCallCb, 'value');
     return () => {
       addDebugLog(`Cleaning up incoming call listener for path: ${incomingCallDbRefPath}`);
-      removeFirebaseListener(incomingCallDbRefPath);
+      removeFirebaseListener(incomingCallDbRef, 'value');
       stopRingingSound();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -835,7 +877,8 @@ export default function HomePage() {
   useEffect(() => {
     if (!currentDirectChatId || !sessionUser?.id) {
       if (currentDirectChatId) {
-        removeFirebaseListener(`directChats/${currentDirectChatId}/messages`);
+        const chatPath = `directChats/${currentDirectChatId}/messages`;
+        removeFirebaseListener(ref(db, chatPath) as FirebaseQuery, 'value'); // Cast to FirebaseQuery
         setDirectChatMessages([]);
       }
       return;
@@ -857,7 +900,7 @@ export default function HomePage() {
 
     return () => {
       addDebugLog(`Cleaning up direct chat listener for chat ID: ${currentDirectChatId}`);
-      removeFirebaseListener(`directChats/${currentDirectChatId}/messages`);
+      removeFirebaseListener(directChatMessagesQuery, 'value');
     };
   }, [currentDirectChatId, sessionUser?.id, addFirebaseListener, removeFirebaseListener, addDebugLog]);
 
@@ -1065,7 +1108,7 @@ export default function HomePage() {
        if (chatStateRef.current !== 'idle') wrappedSetChatState('idle');
     }
     addDebugLog(`Direct chat setup with ${targetUser.name}. Chat ID: ${newDirectChatId}. Panel open: true.`);
-  }, [sessionUser, toast, handleEndCall, isManuallyOnline, wrappedSetChatState]);
+  }, [sessionUser, toast, handleEndCall, isManuallyOnline, wrappedSetChatState, addDebugLog]);
 
 
   if (pageLoading) {
@@ -1218,7 +1261,7 @@ export default function HomePage() {
           </Card>
 
 
-          {!isManuallyOnline && (
+          {!isManuallyOnline && !isDirectChatPanelOpen &&(
             <div className="text-center p-4 my-4 bg-muted/50 rounded-md w-full">
               <WifiOff className="w-10 h-10 mx-auto text-muted-foreground mb-2" />
               <p className="font-semibold text-foreground">You are Currently Offline</p>
@@ -1226,7 +1269,7 @@ export default function HomePage() {
             </div>
           )}
 
-          {isManuallyOnline && (
+          {isManuallyOnline && !isDirectChatPanelOpen && (
             <div className="w-full mt-4">
               <OnlineUsersPanel
                 onlineUsers={onlineUsers}
@@ -1236,7 +1279,7 @@ export default function HomePage() {
               />
             </div>
           )}
-          {isManuallyOnline && onlineUsers.filter(u => u.id !== sessionUser?.id).length > 0 && (
+          {isManuallyOnline && onlineUsers.filter(u => u.id !== sessionUser?.id).length > 0 && !isDirectChatPanelOpen &&(
             <Button onClick={handleFeelingLucky} size="lg" className="mt-4 w-full max-w-xs">
               <Shuffle className="mr-2 h-5 w-5" />
               Feeling Lucky? (Random Call)
