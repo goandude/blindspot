@@ -74,11 +74,13 @@ export default function RoomPage() {
 
             participantsRef.current.forEach(prevUser => {
                 if (!currentUserIds.has(prevUser.id) && prevUser.id !== currentSUserId) {
-                     toast({
-                        title: "User Left",
-                        description: `${prevUser.name || 'A user'} has left the room.`,
-                        variant: "default",
-                    });
+                     setTimeout(() => {
+                        toast({
+                            title: "User Left",
+                            description: `${prevUser.name || 'A user'} has left the room.`,
+                            variant: "default",
+                        });
+                    }, 0);
                     addDebugLog(`User Left Toast: ${prevUser.name} (${prevUser.id})`);
                 }
             });
@@ -244,11 +246,7 @@ export default function RoomPage() {
     peerConnectionsRef.current.clear();
     setRemoteStreams(new Map());
     addDebugLog("All peer connections cleaned up.");
-    if (roomId && sessionUser?.id) {
-      remove(ref(db, `conferenceRooms/${roomId}/participants/${sessionUser.id}`)).catch(e => addDebugLog(`Error removing self from participants: ${e.message}`));
-      remove(ref(db, `conferenceRooms/${roomId}/signals/${sessionUser.id}`)).catch(e => addDebugLog(`Error removing my signals folder: ${e.message}`));
-      addDebugLog(`Removed self from participants and signals for room ${roomId}.`);
-    }
+    
     firebaseListeners.current.forEach(({ ref: fRef, callback, eventType }) => { 
         try {
             off(fRef, eventType as any, callback); 
@@ -258,11 +256,21 @@ export default function RoomPage() {
         }
     });
     firebaseListeners.current.clear();
+
+    if (roomId && sessionUser?.id) {
+      remove(ref(db, `conferenceRooms/${roomId}/participants/${sessionUser.id}`)).catch(e => addDebugLog(`Error removing self from participants: ${e.message}`));
+      remove(ref(db, `conferenceRooms/${roomId}/signals/${sessionUser.id}`)).catch(e => addDebugLog(`Error removing my signals folder: ${e.message}`));
+      addDebugLog(`Removed self from participants and signals for room ${roomId}.`);
+    }
+    
     setParticipants([]); 
     participantsRef.current = []; 
     setConferenceChatMessages([]);
     setIsChatPanelOpen(false);
-    toast({ title: "Left Room", description: "You have left the conference room." });
+    
+    setTimeout(() => {
+        toast({ title: "Left Room", description: "You have left the conference room." });
+    }, 0);
     router.push('/');
   }, [roomId, sessionUser, localStream, cleanupPeerConnection, addDebugLog, toast, router, setParticipants]);
 
@@ -285,7 +293,7 @@ export default function RoomPage() {
     };
 
     pc.ontrack = event => {
-      const currentPeerId = peerId; // Closure for peerId
+      const currentPeerId = peerId; 
       addDebugLog(`Caller: Ontrack from ${currentPeerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}. Streams: ${event.streams.length}`);
       setRemoteStreams(prevMap => {
         const newMap = new Map(prevMap);
@@ -296,11 +304,11 @@ export default function RoomPage() {
           streamToUpdate = entry.stream;
           if (!streamToUpdate.getTrackById(event.track.id)) {
             streamToUpdate.addTrack(event.track);
-            addDebugLog(`Caller: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${currentPeerId}. Stream tracks: ${streamToUpdate.getTracks().map(t=>t.id).join()}`);
+            addDebugLog(`Caller: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${currentPeerId}.`);
           }
         } else {
           streamToUpdate = new MediaStream([event.track]);
-          addDebugLog(`Caller: Created new stream with track ${event.track.kind} (${event.track.id}) for ${currentPeerId}. Stream tracks: ${streamToUpdate.getTracks().map(t=>t.id).join()}`);
+          addDebugLog(`Caller: Created new stream with track ${event.track.kind} (${event.track.id}) for ${currentPeerId}.`);
         }
         const participantInfo = participantsRef.current.find(p => p.id === currentPeerId);
         newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo });
@@ -345,7 +353,7 @@ export default function RoomPage() {
           pc.onicecandidate = event => { if (event.candidate && roomId && sessionUser?.id) { addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`); const candidatePayload: RoomSignal = { type: 'candidate', senderId: sessionUser.id!, senderName: sessionUser.name, data: event.candidate.toJSON() }; set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`)); }};
           
           pc.ontrack = event => {
-            const currentPeerId = senderId; // Closure for senderId
+            const currentPeerId = senderId; 
             addDebugLog(`Callee: Ontrack from ${currentPeerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}. Streams: ${event.streams.length}`);
              setRemoteStreams(prevMap => {
                 const newMap = new Map(prevMap);
@@ -356,11 +364,11 @@ export default function RoomPage() {
                     streamToUpdate = entry.stream;
                     if (!streamToUpdate.getTrackById(event.track.id)) {
                         streamToUpdate.addTrack(event.track);
-                        addDebugLog(`Callee: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${currentPeerId}. Stream tracks: ${streamToUpdate.getTracks().map(t=>t.id).join()}`);
+                        addDebugLog(`Callee: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${currentPeerId}.`);
                     }
                 } else {
                     streamToUpdate = new MediaStream([event.track]);
-                    addDebugLog(`Callee: Created new stream with track ${event.track.kind} (${event.track.id}) for ${currentPeerId}. Stream tracks: ${streamToUpdate.getTracks().map(t=>t.id).join()}`);
+                    addDebugLog(`Callee: Created new stream with track ${event.track.kind} (${event.track.id}) for ${currentPeerId}.`);
                 }
                 const participantInfo = participantsRef.current.find(p => p.id === currentPeerId);
                 newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo });
@@ -462,9 +470,10 @@ export default function RoomPage() {
       addDebugLog(`Error getting media: ${err.message}`);
       toast({ title: "Media Access Error", description: `Could not access camera/microphone: ${err.message}. Please check permissions.`, variant: "destructive" });
       setLocalStream(null); 
-      return; 
+      return; // Exit if media cannot be acquired
     }
 
+    // This part only runs if stream was successfully acquired
     if (stream) {
         try {
             const participantRefPath = `conferenceRooms/${roomId}/participants/${sessionUser.id}`;
@@ -495,7 +504,7 @@ export default function RoomPage() {
         } catch (dbError: any) {
             addDebugLog(`Error setting Firebase participant data: ${dbError.message}`);
             toast({ title: "Room Join Error", description: `Could not update room participation: ${dbError.message}`, variant: "destructive" });
-            stream.getTracks().forEach(track => track.stop());
+            stream.getTracks().forEach(track => track.stop()); // Stop tracks if DB update fails
             setLocalStream(null);
             setIsInRoom(false); // Ensure user is not marked as in room if DB update fails
         }
@@ -570,7 +579,17 @@ export default function RoomPage() {
     return (
       <div className="relative w-full aspect-video bg-gray-800 rounded-lg overflow-hidden shadow-md flex items-center justify-center">
         <video ref={videoRef} autoPlay playsInline muted={isLocal} className="w-full h-full object-cover" style={{ display: stream && isVideoActuallyOn ? 'block' : 'none' }} />
-        {(!stream || !isVideoActuallyOn) && (<div className="absolute inset-0 flex flex-col items-center justify-center text-white p-2 space-y-1 sm:space-y-2"><FallbackAvatar /><p className="text-xs sm:text-sm font-medium truncate max-w-[90%]">{user?.name || user?.id?.substring(0,8) || 'User'}</p><p className="text-xs text-gray-400">{isLocal && !stream ? "Camera not available" : (isLocal ? "Your video is off" : (stream ? "Video off" : "No stream"))}</p></div>)}
+        {(!stream || !isVideoActuallyOn) && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-white p-2 space-y-1 sm:space-y-2">
+                <FallbackAvatar />
+                <p className="text-xs sm:text-sm font-medium truncate max-w-[90%]">{user?.name || user?.id?.substring(0,8) || 'User'}</p>
+                <p className="text-xs text-gray-400">
+                    {isLocal && !stream ? "Camera not available" : 
+                     (isLocal ? "Your video is off" : 
+                      (stream ? "Video off" : "No stream"))}
+                </p>
+            </div>
+        )}
         <div className="absolute bottom-0 left-0 p-1.5 sm:p-2 bg-gradient-to-t from-black/60 to-transparent w-full"><p className="text-white text-xs sm:text-sm truncate">{isLocal ? `${sessionUser?.name || 'You'} (You)` : user?.name || user?.id?.substring(0,8) || 'Remote User'}</p></div>
       </div>
     );
@@ -588,7 +607,8 @@ export default function RoomPage() {
   return (
     <MainLayout fullscreen>
       <div className="flex h-screen bg-black text-white">
-        <div className="relative flex-grow flex flex-col overflow-hidden"> {/* Main content area for video grid and controls */}
+        {/* Main content area for video grid and controls */}
+        <div className="relative flex-grow flex flex-col overflow-hidden"> 
             <div 
               className="flex-grow p-1 sm:p-2 md:p-4 grid gap-1 sm:gap-2 md:gap-4 items-start justify-center overflow-auto"
               style={calculateGridStyle(totalStreamsToDisplay > 0 ? totalStreamsToDisplay : 1)}
@@ -610,7 +630,7 @@ export default function RoomPage() {
               )}
             </div>
             {isInRoom && (
-              <div className="absolute bottom-0 left-0 right-0 p-2 sm:p-3 bg-black/70 flex justify-between items-center z-20 shadow-lg"> {/* z-20 to be above grid but below chat panel if it's z-30+ */}
+              <div className="absolute bottom-0 left-0 right-0 p-2 sm:p-3 bg-black/70 flex justify-between items-center z-20 shadow-lg"> 
                 <div className="text-xs sm:text-sm text-gray-300 hidden md:block">
                   Room: {roomId?.substring(0,6)}... ({_participants.length})
                 </div>
@@ -646,7 +666,7 @@ export default function RoomPage() {
         {/* Chat Panel Sidebar */}
         {isInRoom && (
           <div className={cn(
-            "h-full bg-gray-900/90 backdrop-blur-sm shadow-2xl transition-all duration-300 ease-in-out z-30 flex-shrink-0", // z-30 to be on top
+            "h-full bg-gray-900/90 backdrop-blur-sm shadow-2xl transition-all duration-300 ease-in-out z-30 flex-shrink-0", 
             isChatPanelOpen ? `w-full ${CHAT_PANEL_WIDTH_CLASS}` : "w-0 overflow-hidden" 
           )}>
             {isChatPanelOpen && roomId && sessionUser && ( 
@@ -680,3 +700,4 @@ export default function RoomPage() {
     </MainLayout>
   );
 }
+
