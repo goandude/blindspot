@@ -53,6 +53,8 @@ export default function RoomPage() {
   const [conferenceChatMessages, setConferenceChatMessages] = useState<ChatMessage[]>([]); // State for chat messages
 
   const firebaseListeners = useRef<Map<string, { ref: DatabaseReference | FirebaseQuery, callback: (snapshot: any) => void, eventType: string }>>(new Map());
+  const CHAT_PANEL_WIDTH_CLASS = "max-w-sm sm:max-w-md"; // Tailwind classes for chat panel width
+  const CHAT_PANEL_WIDTH_PX = "448px"; // Approx pixel equivalent for max-w-md (32rem * 16px/rem), sm:max-w-md (28rem)
 
   useEffect(() => {
     participantsRef.current = participants;
@@ -60,7 +62,7 @@ export default function RoomPage() {
 
   const addDebugLog = useCallback((message: string) => {
     // console.log(`[Room DEBUG] ${roomId?.substring(0,4) || 'N/A'} - ${sessionUser?.id?.substring(0,4) || 'N/A'} - ${message}`);
-  }, []); // Removed sessionUser and roomId to stabilize this ref
+  }, []); 
 
   const addFirebaseDbListener = useCallback((
     dbQueryOrRef: DatabaseReference | FirebaseQuery | undefined,
@@ -175,8 +177,6 @@ export default function RoomPage() {
       pc.ontrack = null; pc.onicecandidate = null; pc.oniceconnectionstatechange = null; pc.onsignalingstatechange = null;
       
       pc.getSenders().forEach(sender => {
-        // Do NOT stop sender.track here, as it's the shared local track.
-        // Only remove it from this specific peer connection.
         if (sender.track && pc.signalingState !== 'closed') {
           try { 
             pc.removeTrack(sender);
@@ -228,6 +228,7 @@ export default function RoomPage() {
     firebaseListeners.current.clear();
     setParticipants([]);
     setConferenceChatMessages([]);
+    setIsChatPanelOpen(false); // Close chat panel on leave
     toast({ title: "Left Room", description: "You have left the conference room." });
     router.push('/');
   }, [roomId, sessionUser, localStream, cleanupPeerConnection, addDebugLog, toast, router]);
@@ -270,15 +271,16 @@ export default function RoomPage() {
           newRemoteStreams.set(peerId, entry);
         } else {
           let trackAddedToExistingStream = false;
+          const existingStreamTracks = entry.stream.getTracks().map(t => t.id);
           if (event.streams && event.streams[0]) {
              event.streams[0].getTracks().forEach(track => {
-                if (!entry!.stream.getTrackById(track.id)) {
+                if (!existingStreamTracks.includes(track.id)) {
                     entry!.stream.addTrack(track);
                     trackAddedToExistingStream = true;
                 }
              });
           } else {
-            if (!entry!.stream.getTrackById(event.track.id)) {
+            if (!existingStreamTracks.includes(event.track.id)) {
                 entry!.stream.addTrack(event.track);
                 trackAddedToExistingStream = true;
             }
@@ -300,7 +302,7 @@ export default function RoomPage() {
     pc.oniceconnectionstatechange = () => { 
       const iceState = pc.iceConnectionState;
       addDebugLog(`ICE state for ${peerId}: ${iceState}`); 
-      if (['failed', 'closed'].includes(iceState)) { 
+      if (iceState === 'failed' || iceState === 'closed') { 
         addDebugLog(`ICE connection to ${peerId} ${iceState}. Cleaning up.`); 
         cleanupPeerConnection(peerId); 
       } else if (iceState === 'disconnected') {
@@ -333,7 +335,7 @@ export default function RoomPage() {
           localStream.getTracks().forEach(track => { try { pc!.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} to PC for ${senderId} (on offer)`);} catch (e:any) { addDebugLog(`Error adding local track on offer from ${senderId}: ${e.message}`); }});
           pc.onicecandidate = event => { if (event.candidate && roomId && sessionUser?.id) { addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`); const candidatePayload: RoomSignal = { type: 'candidate', senderId: sessionUser.id!, senderName: sessionUser.name, data: event.candidate.toJSON() }; set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`)); }};
           pc.ontrack = event => {
-            addDebugLog(`Remote track received from ${senderId} (on offer path): Kind: ${event.track.kind}, ID: ${event.track.id}`);
+            addDebugLog(`Remote track received from ${senderId} (on offer path): Kind: ${event.track.kind}, ID: ${event.track.id}. Stream has ${event.streams[0]?.getTracks().length || 0} tracks.`);
             setRemoteStreams(prevRemoteStreams => {
               const newRemoteStreams = new Map(prevRemoteStreams); let entry = newRemoteStreams.get(senderId); const currentParticipantData = participantsRef.current.find(p => p.id === senderId);
               if (!entry) { 
@@ -342,9 +344,9 @@ export default function RoomPage() {
                 entry = { stream: newStream, userInfo: currentParticipantData }; newRemoteStreams.set(senderId, entry); 
                 addDebugLog(`Created new stream entry for ${senderId} via offer path, tracks: ${newStream.getTracks().length}`); 
               } else {
-                let trackAdded = false;
-                if (event.streams && event.streams[0]) { event.streams[0].getTracks().forEach(track => { if(!entry!.stream.getTrackById(track.id)) { entry!.stream.addTrack(track); trackAdded = true; }});
-                } else { if(!entry!.stream.getTrackById(event.track.id)) { entry!.stream.addTrack(event.track); trackAdded = true; }}
+                let trackAdded = false; const existingStreamTracks = entry.stream.getTracks().map(t => t.id);
+                if (event.streams && event.streams[0]) { event.streams[0].getTracks().forEach(track => { if(!existingStreamTracks.includes(track.id)) { entry!.stream.addTrack(track); trackAdded = true; }});
+                } else { if(!existingStreamTracks.includes(event.track.id)) { entry!.stream.addTrack(event.track); trackAdded = true; }}
                 if (trackAdded) addDebugLog(`Added track(s) to existing stream for ${senderId} via offer path. Total tracks: ${entry.stream.getTracks().length}`);
                 if (currentParticipantData && (!entry.userInfo || entry.userInfo.id !== currentParticipantData.id || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl)) {
                   newRemoteStreams.set(senderId, { ...entry, userInfo: currentParticipantData }); addDebugLog(`Updated userInfo for ${senderId} via offer path. New name: ${currentParticipantData?.name}`);
@@ -359,7 +361,7 @@ export default function RoomPage() {
           pc.oniceconnectionstatechange = () => { 
             const iceState = pc!.iceConnectionState;
             addDebugLog(`ICE state for ${senderId} (on offer path): ${iceState}`); 
-            if (['failed', 'closed'].includes(iceState)) { 
+            if (iceState === 'failed' || iceState === 'closed') { 
               addDebugLog(`ICE connection to ${senderId} ${iceState} (on offer path). Cleaning up.`); cleanupPeerConnection(senderId); 
             } else if (iceState === 'disconnected') {
               addDebugLog(`ICE connection to ${senderId} (on offer path) is disconnected. Monitoring for potential recovery.`);
@@ -501,20 +503,18 @@ export default function RoomPage() {
 
   return (
     <MainLayout fullscreen>
-      <div className="flex h-screen bg-black text-white relative">
-        <div className={cn(
-          "flex-grow transition-all duration-300 ease-in-out",
-          isChatPanelOpen ? "w-3/4" : "w-full" 
-        )}>
-          {isInRoom && (
+      <div className="flex h-screen bg-black text-white">
+        {/* Main content area: Video Grid + Controls */}
+        <div className="relative flex-grow flex flex-col overflow-hidden">
+            {/* Video Grid Area */}
             <div 
-              className="h-full p-1 sm:p-2 md:p-4 grid gap-1 sm:gap-2 md:gap-4 items-start justify-center overflow-auto"
+              className="flex-grow p-1 sm:p-2 md:p-4 grid gap-1 sm:gap-2 md:gap-4 items-start justify-center overflow-auto"
               style={calculateGridStyle(totalStreamsToDisplay > 0 ? totalStreamsToDisplay : 1)}
             >
-              {localStream && sessionUser && (
+              {isInRoom && localStream && sessionUser && (
                 <VideoFeed key="local" stream={localStream} user={sessionUser} isLocal isVideoActuallyOn={isVideoOn} addDebugLogProp={addDebugLog} />
               )}
-              {Array.from(remoteStreams.entries()).map(([peerId, { stream, userInfo }]) => {
+              {isInRoom && Array.from(remoteStreams.entries()).map(([peerId, { stream, userInfo }]) => {
                   const remoteVideoTracks = stream.getVideoTracks();
                   const isRemoteVideoActuallyOn = remoteVideoTracks.length > 0 && remoteVideoTracks.every(track => track.enabled && !track.muted); 
                   return <VideoFeed key={peerId} stream={stream} user={userInfo} isLocal={false} isVideoActuallyOn={isRemoteVideoActuallyOn} addDebugLogProp={addDebugLog} />;
@@ -526,15 +526,48 @@ export default function RoomPage() {
                 </div>
               )}
             </div>
-          )}
+             {/* Controls Bar - absolutely positioned at the bottom of the video grid container */}
+            {isInRoom && (
+              <div className="absolute bottom-0 left-0 right-0 p-2 sm:p-3 bg-black/75 flex justify-between items-center z-10 shadow-lg">
+                <div className="text-xs sm:text-sm text-gray-300 hidden md:block">
+                  Room: {roomId?.substring(0,6)}... ({participants.length})
+                </div>
+                <div className="flex-grow flex justify-center gap-2 sm:gap-3">
+                  <Button variant="ghost" size="icon" onClick={toggleMic} disabled={!localStream} className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12">
+                    {isMicOn ? <Mic className="h-5 w-5 sm:h-6 sm:w-6" /> : <MicOff className="h-5 w-5 sm:h-6 sm:w-6 text-red-400" />}
+                  </Button>
+                  <Button variant="ghost" size="icon" onClick={toggleVideo} disabled={!localStream} className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12">
+                    {isVideoOn ? <VideoIcon className="h-5 w-5 sm:h-6 sm:w-6" /> : <VideoOffIcon className="h-5 w-5 sm:h-6 sm:w-6 text-red-400" />}
+                  </Button>
+                  <Button 
+                      variant="ghost" 
+                      size="icon" 
+                      onClick={() => setIsChatPanelOpen(prev => !prev)} 
+                      className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12"
+                      aria-label="Toggle chat panel"
+                    >
+                    <MessageSquare className="h-5 w-5 sm:h-6 sm:w-6" />
+                  </Button>
+                  <Button variant="destructive" size="sm" onClick={handleLeaveRoom} className="rounded-full px-4 h-10 sm:h-12 text-xs sm:text-sm">
+                    <PhoneOff className="mr-1 sm:mr-2 h-4 w-4 sm:h-5 sm:w-5" /> Leave
+                  </Button>
+                </div>
+                <div className="hidden md:block">
+                  <Button onClick={copyRoomLinkToClipboard} variant="ghost" size="sm" className="text-gray-300 hover:text-white hover:bg-white/20 text-xs sm:text-sm">
+                    <Copy className="mr-1 sm:mr-2 h-3 w-3 sm:h-4 sm:w-4" /> Copy Link
+                  </Button>
+                </div>
+              </div>
+            )}
         </div>
 
+        {/* Chat Panel - fixed width, slides in/out */}
         {isInRoom && (
           <div className={cn(
-            "fixed top-0 right-0 h-full bg-gray-900/80 backdrop-blur-sm shadow-2xl transition-transform duration-300 ease-in-out z-40",
-            isChatPanelOpen ? "translate-x-0 w-full max-w-sm sm:max-w-md" : "translate-x-full w-0" 
+            "h-full bg-gray-900/80 backdrop-blur-sm shadow-2xl transition-all duration-300 ease-in-out z-20 flex-shrink-0",
+            isChatPanelOpen ? `w-full ${CHAT_PANEL_WIDTH_CLASS}` : "w-0" 
           )}>
-            {isChatPanelOpen && roomId && sessionUser && (
+            {isChatPanelOpen && roomId && sessionUser && ( // Only render ChatPanel when open
                  <ChatPanel
                     messages={conferenceChatMessages}
                     onSendMessage={handleSendConferenceMessage}
@@ -547,39 +580,6 @@ export default function RoomPage() {
           </div>
         )}
 
-
-        {isInRoom && (
-          <div className="fixed bottom-0 left-0 right-0 p-2 sm:p-3 bg-black/75 flex justify-between items-center z-50 shadow-lg">
-            <div className="text-xs sm:text-sm text-gray-300 hidden md:block">
-              Room: {roomId?.substring(0,6)}... ({participants.length})
-            </div>
-            <div className="flex-grow flex justify-center gap-2 sm:gap-3">
-              <Button variant="ghost" size="icon" onClick={toggleMic} disabled={!localStream} className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12">
-                {isMicOn ? <Mic className="h-5 w-5 sm:h-6 sm:w-6" /> : <MicOff className="h-5 w-5 sm:h-6 sm:w-6 text-red-400" />}
-              </Button>
-              <Button variant="ghost" size="icon" onClick={toggleVideo} disabled={!localStream} className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12">
-                {isVideoOn ? <VideoIcon className="h-5 w-5 sm:h-6 sm:w-6" /> : <VideoOffIcon className="h-5 w-5 sm:h-6 sm:w-6 text-red-400" />}
-              </Button>
-               <Button 
-                  variant="ghost" 
-                  size="icon" 
-                  onClick={() => setIsChatPanelOpen(prev => !prev)} 
-                  className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12"
-                  aria-label="Toggle chat panel"
-                >
-                <MessageSquare className="h-5 w-5 sm:h-6 sm:w-6" />
-              </Button>
-              <Button variant="destructive" size="sm" onClick={handleLeaveRoom} className="rounded-full px-4 h-10 sm:h-12 text-xs sm:text-sm">
-                <PhoneOff className="mr-1 sm:mr-2 h-4 w-4 sm:h-5 sm:w-5" /> Leave
-              </Button>
-            </div>
-            <div className="hidden md:block">
-              <Button onClick={copyRoomLinkToClipboard} variant="ghost" size="sm" className="text-gray-300 hover:text-white hover:bg-white/20 text-xs sm:text-sm">
-                <Copy className="mr-1 sm:mr-2 h-3 w-3 sm:h-4 sm:w-4" /> Copy Link
-              </Button>
-            </div>
-          </div>
-        )}
 
         {!isInRoom && !isLoading && sessionUser && (
           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 z-40 p-4 text-center">
@@ -598,5 +598,3 @@ export default function RoomPage() {
     </MainLayout>
   );
 }
-
-    

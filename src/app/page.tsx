@@ -106,20 +106,9 @@ export default function HomePage() {
 
   useEffect(() => {
     chatStateRef.current = chatState;
-    // When chat state becomes 'connected', try to establish direct chat ID
-    if (chatState === 'connected' && sessionUser?.id && peerIdRef.current) {
-        const directChatId = getDirectChatId(sessionUser.id, peerIdRef.current);
-        setCurrentDirectChatId(directChatId);
-        addDebugLog(`Direct chat ID set: ${directChatId}`);
-    } else if (chatState !== 'connected' && currentDirectChatId) {
-        setCurrentDirectChatId(null); // Clear chat ID if not connected
-        setDirectChatMessages([]); // Clear messages
-        setIsDirectChatPanelOpen(false); // Close panel
-        addDebugLog("Direct chat ID cleared.");
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [chatState, sessionUser, addDebugLog]); // peerIdRef.current is managed via ref, so not a direct dep here
+  }, [chatState]);
 
+  // Effect to manage session user based on auth state
   useEffect(() => {
     addDebugLog(`Auth state update: authLoading=${authLoading}, authProfileLoading=${authProfileLoading}, authCurrentUser=${authCurrentUser?.uid}, isProfileSetupNeeded=${isProfileSetupNeeded}, anonymousSessionId=${anonymousSessionId}`);
 
@@ -128,8 +117,8 @@ export default function HomePage() {
       setPageLoading(true);
       return;
     }
-    
-    if (authCurrentUser) { // Google user is present
+
+    if (authCurrentUser) {
       if (authProfileLoading) {
         addDebugLog(`Auth user ${authCurrentUser.uid} present, but profile is loading (authProfileLoading=true). Page remains loading.`);
         setPageLoading(true); return;
@@ -145,7 +134,7 @@ export default function HomePage() {
         setPageLoading(false);
         if (anonymousSessionId) {
             addDebugLog(`Clearing anonymousSessionId (${anonymousSessionId}) as Google user is active.`);
-            setAnonymousSessionId(null); // Clear anonymous ID if a Google user is now active
+            setAnonymousSessionId(null);
         }
       } else if (isProfileSetupNeeded) {
         addDebugLog(`Google user ${authCurrentUser.uid} authenticated, but profile setup is needed. Page loading false, ProfileSetupDialog should show.`);
@@ -156,15 +145,15 @@ export default function HomePage() {
         }
       } else {
         addDebugLog(`WARN: authCurrentUser exists but authUserProfile is null and profile not loading/setup needed. User: ${authCurrentUser.uid}. This might indicate an issue with profile creation/fetching logic in useAuth.`);
-        setPageLoading(false); // Allow UI to render, useAuth should handle profile logic
+        setPageLoading(false);
       }
     } else { // No Google user (authLoading is false) -> This implies anonymous user path
-      if (!anonymousSessionId) { // Generate anonymous ID ONLY if auth is done and NO Google user
+      if (!anonymousSessionId) {
         const newAnonId = generateAnonymousSessionId();
-        setAnonymousSessionId(newAnonId);
         addDebugLog(`Generated new anonymous session ID (auth confirmed no Google user): ${newAnonId}.`);
+        setAnonymousSessionId(newAnonId);
         setPageLoading(true); // Set loading true while we fetch country for new anon user
-        return; // Return to allow state update and re-run effect
+        return;
       }
       
       addDebugLog(`No Google user. Using anonymous session ID: ${anonymousSessionId}.`);
@@ -186,8 +175,7 @@ export default function HomePage() {
         setPageLoading(false);
       };
       
-      // Ensure we don't try to set an anonymous user if a Google user just signed in (and anonymousSessionId hasn't cleared yet)
-      if (!authCurrentUser && anonymousSessionId && (!sessionUser || sessionUser.id !== anonymousSessionId)) {
+      if (anonymousSessionId && (!sessionUser || sessionUser.id !== anonymousSessionId)) {
           fetchCountryAndSetAnonymousUser();
       } else if (sessionUser && sessionUser.id === anonymousSessionId) {
           setPageLoading(false); // Already set up this anonymous user
@@ -238,9 +226,6 @@ export default function HomePage() {
     }
     const actualCallback = (snapshot: any) => listenerFunc(snapshot);
     
-    // For 'child_added', we need to use onChildAdded, not onValue
-    // However, for simplicity and consistency with existing code, using onValue and processing children.
-    // If performance becomes an issue with large chat lists, switch to onChildAdded.
     onValue(dbQueryOrRef, actualCallback, (error) => { // @ts-ignore - onValue can take Query
       addDebugLog(`ERROR reading from ${path} (event: ${eventType}): ${error.message}`);
       toast({ title: "Firebase Error", description: `Failed to listen to ${path}. Check console.`, variant: "destructive" });
@@ -273,7 +258,8 @@ export default function HomePage() {
       peerConnectionRef.current.getSenders().forEach(sender => {
         if (sender.track) {
           addDebugLog(`Stopping sender track: ${sender.track.kind}`);
-          sender.track.stop(); // This is OK for 1-to-1, as localStream is re-acquired
+          // Do NOT stop sender.track() here, as localStream is managed globally for 1-to-1
+          // sender.track.stop(); 
         }
       });
       if (peerConnectionRef.current.signalingState !== 'closed') {
@@ -361,10 +347,21 @@ export default function HomePage() {
       addDebugLog(`Call ended. Transitioning to 'idle' state (no reveal or peerId missing/not connected).`);
     }
     roomIdRef.current = null;
-    if (chatStateRef.current === 'idle' || chatStateRef.current === 'revealed') {
-      peerIdRef.current = null;
-    }
+    // Only clear peerId if truly idle or revealed. If initiating new chat, peerId might be set.
+    // This is now handled by the direct chat initiation logic.
+    // if (chatStateRef.current === 'idle' || chatStateRef.current === 'revealed') {
+    //   peerIdRef.current = null;
+    // }
     isCallerRef.current = false;
+
+    // Clear chat panel if it was open for this call, unless a new chat is being initiated.
+    // This logic is complex. Let's assume if chatState goes to idle/revealed, chat panel should clear.
+    if (chatStateRef.current === 'idle' || chatStateRef.current === 'revealed') {
+        setCurrentDirectChatId(null);
+        setDirectChatMessages([]);
+        setIsDirectChatPanelOpen(false);
+    }
+
   }, [cleanupWebRTC, cleanupCallData, onlineUsers, peerInfo, removeFirebaseListener, addDebugLog, wrappedSetChatState, authCurrentUser, stopRingingSound]);
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
@@ -407,6 +404,12 @@ export default function HomePage() {
         if (['connecting', 'dialing'].includes(chatStateRef.current)) {
           addDebugLog("ICE fully connected/completed, setting chat state to 'connected'.");
           wrappedSetChatState('connected');
+          // Setup direct chat ID when connected
+          if (sessionUser?.id && peerIdRef.current) {
+            const directChatId = getDirectChatId(sessionUser.id, peerIdRef.current);
+            setCurrentDirectChatId(directChatId);
+            addDebugLog(`Direct chat ID set on connection: ${directChatId}`);
+          }
         }
       } else if (['failed', 'disconnected', 'closed'].includes(iceState)) {
         if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
@@ -421,7 +424,7 @@ export default function HomePage() {
       addDebugLog(`Signaling state changed: ${peerConnectionRef.current.signalingState}`);
     };
     return pc;
-  }, [handleEndCall, toast, addDebugLog, wrappedSetChatState]);
+  }, [handleEndCall, toast, addDebugLog, wrappedSetChatState, sessionUser]);
 
   const startLocalStream = useCallback(async (): Promise<MediaStream | null> => {
     const myId = currentSessionUserIdRef.current;
@@ -461,9 +464,14 @@ export default function HomePage() {
     }
     addDebugLog(`Initiating direct call from ${sUser.id} to ${targetUser.name} (${targetUser.id}).`);
     if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
-      addDebugLog(`In non-idle state (${chatStateRef.current}), ending existing call before initiating new one.`);
-      await handleEndCall(false);
+      addDebugLog(`In non-idle state (${chatStateRef.current}), ending existing call/chat before initiating new one.`);
+      await handleEndCall(false); // End previous call/chat session
     }
+    // Reset chat panel related state
+    setCurrentDirectChatId(null);
+    setDirectChatMessages([]);
+    setIsDirectChatPanelOpen(false);
+
     wrappedSetChatState('dialing'); setPeerInfo(targetUser);
     peerIdRef.current = targetUser.id; isCallerRef.current = true;
     const stream = await startLocalStream();
@@ -543,6 +551,12 @@ export default function HomePage() {
       return;
     }
     addDebugLog(`Callee ${sUser.id}: Processing incoming offer from ${offerData.callerName} (${offerData.callerId}). Room: ${offerData.roomId}.`);
+    
+    // Reset chat panel related state
+    setCurrentDirectChatId(null);
+    setDirectChatMessages([]);
+    setIsDirectChatPanelOpen(false);
+
     wrappedSetChatState('connecting');
     peerIdRef.current = offerData.callerId; roomIdRef.current = offerData.roomId; isCallerRef.current = false; // roomIdRef set for 1-to-1 call
     const peerForInfo: OnlineUser = {
@@ -691,13 +705,10 @@ export default function HomePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionUser, isManuallyOnline]);
 
+  // Presence for anonymous users (onDisconnect)
   useEffect(() => {
-    if (authCurrentUser || !anonymousSessionId) {
-      addDebugLog("Anonymous Presence (connection): Skipping - Google user active or anonymousSessionId not ready.");
-      return;
-    }
-    if (!sessionUser || sessionUser.id !== anonymousSessionId || sessionUser.isGoogleUser) {
-      addDebugLog(`Anonymous Presence (connection): Skipping - sessionUser (${sessionUser?.id}, isGoogle: ${sessionUser?.isGoogleUser}) not aligned with anonymous state (${anonymousSessionId}).`);
+    if (authCurrentUser || !anonymousSessionId || !sessionUser || sessionUser.id !== anonymousSessionId || sessionUser.isGoogleUser) {
+      addDebugLog(`Anonymous Presence (connection): Skipping. Conditions: authCurrentUser=${!!authCurrentUser}, anonymousSessionId=${anonymousSessionId}, sessionUser.id=${sessionUser?.id}, sessionUser.isGoogleUser=${sessionUser?.isGoogleUser}`);
       return;
     }
     const myId = anonymousSessionId;
@@ -712,7 +723,7 @@ export default function HomePage() {
       if (snapshot.val() === true) {
         addDebugLog(`Anonymous Presence (connection): Firebase connection established for ${myId}.`);
         if (isManuallyOnline && isPageVisibleRef.current) {
-           updateUserOnlineStatus(true);
+           updateUserOnlineStatus(true); // This already handles onDisconnect setup for anonymous
         }
       } else {
         addDebugLog(`Anonymous Presence (connection): Firebase connection lost for ${myId}. onDisconnect should handle removal.`);
@@ -722,12 +733,7 @@ export default function HomePage() {
     return () => {
       addDebugLog(`Anonymous Presence (connection): Cleaning up for ${myId}. Detaching .info/connected listener.`);
       removeFirebaseListener(connectedDbRef.toString().substring(connectedDbRef.root.toString().length-1));
-      if (myId && isManuallyOnline) {
-        const pathToRemove = `onlineUsers/${myId}`;
-        remove(ref(db, pathToRemove))
-          .then(() => addDebugLog(`Anonymous Presence (connection): Explicitly removed user ${myId} on cleanup.`))
-          .catch(e => addDebugLog(`Anonymous Presence (connection): WARN: Error removing user ${myId} on cleanup: ${e.message || e}`));
-      }
+      // No need to explicitly remove user here, as onDisconnect in updateUserOnlineStatus should handle it if it was set
     };
   }, [authCurrentUser, anonymousSessionId, sessionUser, addFirebaseListener, removeFirebaseListener, addDebugLog, isManuallyOnline, updateUserOnlineStatus]);
 
@@ -785,23 +791,24 @@ export default function HomePage() {
             return;
         }
 
-        if (chatStateRef.current === 'idle') {
-          if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
-            addDebugLog(`Valid new/different offer by ${myId} from ${newOfferData.callerName}. Setting to state. New Room: ${newOfferData.roomId}`);
-            setIncomingCallOfferDetails(newOfferData);
-            playRingingSound();
-            toast({ title: "Incoming Call", description: `From ${newOfferData.callerName}`, duration: 15000 });
-          } else {
-            addDebugLog(`Offer listener: Received same offer data (Room: ${newOfferData.roomId}) as currently displayed. No state change needed.`);
-          }
-        } else { // User is not idle (e.g. in another call, dialing)
-          addDebugLog(`WARN: ${myId} received offer from ${newOfferData.callerId} (room ${newOfferData.roomId}) while in state ${chatStateRef.current}. Removing this offer from DB as user is busy.`);
+        // If already in a call or dialing, or if direct chat is open (implying an interaction)
+        if (chatStateRef.current !== 'idle' || (isDirectChatPanelOpen && currentDirectChatId)) {
+          addDebugLog(`WARN: ${myId} received offer from ${newOfferData.callerId} (room ${newOfferData.roomId}) while busy (state ${chatStateRef.current} or chat panel open). Removing this offer from DB.`);
           if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
              remove(incomingCallDbRef).catch(e => addDebugLog(`WARN: Error removing offer (user busy) by ${myId} from DB: ${e.message || e}`));
           }
           if (currentDisplayedOffer?.roomId === newOfferData.roomId) {
             setIncomingCallOfferDetails(null);
             stopRingingSound();
+          }
+        } else { // User is idle and no direct chat open
+          if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
+            addDebugLog(`Valid new/different offer for ${myId} from ${newOfferData.callerName}. Setting to state. New Room: ${newOfferData.roomId}`);
+            setIncomingCallOfferDetails(newOfferData);
+            playRingingSound();
+            toast({ title: "Incoming Call", description: `From ${newOfferData.callerName}`, duration: 15000 });
+          } else {
+            addDebugLog(`Offer listener: Received same offer data (Room: ${newOfferData.roomId}) as currently displayed. No state change needed.`);
           }
         }
       } else { // newOfferData is null (offer removed from Firebase)
@@ -821,7 +828,7 @@ export default function HomePage() {
       stopRingingSound();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentSessionUserIdRef.current, addFirebaseListener, removeFirebaseListener, addDebugLog, playRingingSound, stopRingingSound, toast, isManuallyOnline]);
+  }, [currentSessionUserIdRef.current, addFirebaseListener, removeFirebaseListener, addDebugLog, playRingingSound, stopRingingSound, toast, isManuallyOnline, isDirectChatPanelOpen, currentDirectChatId]);
 
 
   // Listener for Direct Chat Messages
@@ -877,16 +884,6 @@ export default function HomePage() {
         isPageVisibleRef.current = true;
         if (isManuallyOnline) {
           updateUserOnlineStatus(true);
-           if (!currentSUser.isGoogleUser && anonymousSessionId === currentSUser.id) {
-            const userStatusDbRef = ref(db, userOnlinePath);
-             if (userStatusDbRef && typeof userStatusDbRef.onDisconnect === 'function') {
-                userStatusDbRef.onDisconnect().remove()
-                  .then(() => addDebugLog(`Anonymous Presence: onDisconnect().remove() re-set for ${currentSUser.id} on page visible.`))
-                  .catch(e => addDebugLog(`Anonymous Presence: ERROR re-setting onDisconnect for ${currentSUser.id}: ${e.message || e}`));
-             } else {
-                addDebugLog(`Page Visibility: ERROR - userStatusDbRef or onDisconnect not valid for anon ${currentSUser.id} on page visible.`);
-             }
-           }
         }
       }
     };
@@ -899,7 +896,7 @@ export default function HomePage() {
       window.removeEventListener('pageshow', handleVisibilityChange);
       addDebugLog("Cleaned up Page Visibility listeners.");
     };
-  }, [sessionUser, addDebugLog, authCurrentUser, anonymousSessionId, isManuallyOnline, updateUserOnlineStatus]);
+  }, [sessionUser, addDebugLog, isManuallyOnline, updateUserOnlineStatus]);
 
   useEffect(() => {
     const myIdOnUnmount = currentSessionUserIdRef.current;
@@ -915,13 +912,17 @@ export default function HomePage() {
       addDebugLog(`Full cleanup on unmount complete for ${myIdOnUnmount || 'N/A'}.`);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authCurrentUser, isManuallyOnline]);
+  }, [isManuallyOnline]); // Removed authCurrentUser as it's implicitly handled via sessionUser updates
 
   const handleBackToOnlineUsers = async () => {
     addDebugLog(`Handling back to online users from revealed state.`);
     wrappedSetChatState('idle'); setPeerInfo(null);
     peerIdRef.current = null; roomIdRef.current = null; isCallerRef.current = false;
     cleanupWebRTC(); await cleanupCallData();
+    // Clear chat specific states
+    setCurrentDirectChatId(null);
+    setDirectChatMessages([]);
+    setIsDirectChatPanelOpen(false);
   };
 
   const toggleMic = () => {
@@ -1005,7 +1006,6 @@ export default function HomePage() {
 
   const handleSendDirectMessage = useCallback(async (text: string, attachments?: File[]) => {
     if (!currentDirectChatId || !sessionUser || text.trim() === '') return;
-     // File attachment logic to be added later
     if (attachments && attachments.length > 0) {
         toast({title: "Note", description: "File attachments not yet implemented for direct chat.", variant: "default"});
     }
@@ -1025,6 +1025,47 @@ export default function HomePage() {
         toast({ title: "Chat Error", description: "Could not send message.", variant: "destructive" });
     }
   }, [currentDirectChatId, sessionUser, toast, addDebugLog]);
+
+  const handleInitiateDirectChat = useCallback((targetUser: OnlineUser) => {
+    if (!sessionUser) {
+        addDebugLog("handleInitiateDirectChat: No session user.");
+        toast({ title: "Error", description: "Session not ready.", variant: "destructive" });
+        return;
+    }
+    if (targetUser.id === sessionUser.id) {
+        addDebugLog("handleInitiateDirectChat: Cannot chat with self.");
+        toast({ title: "Error", description: "Cannot chat with yourself.", variant: "default" });
+        return;
+    }
+    if (!isManuallyOnline) {
+      toast({ title: "You are Offline", description: "Go online to chat.", variant: "default" });
+      addDebugLog(`Chat attempt by ${sessionUser.id} to ${targetUser.id} blocked: user is manually offline.`);
+      return;
+    }
+
+    addDebugLog(`Initiating direct chat with ${targetUser.name} (${targetUser.id})`);
+    
+    // If in an active call with someone else, end it first
+    if ((chatStateRef.current === 'connected' || chatStateRef.current === 'dialing' || chatStateRef.current === 'connecting') && peerIdRef.current !== targetUser.id) {
+        addDebugLog(`Ending existing call with ${peerIdRef.current} to start chat with ${targetUser.id}`);
+        handleEndCall(false); // End call, no reveal as we are starting a new interaction
+    } else if (chatStateRef.current === 'revealed') { // If in revealed state, clear it
+        wrappedSetChatState('idle');
+    }
+
+    const newDirectChatId = getDirectChatId(sessionUser.id, targetUser.id);
+    setCurrentDirectChatId(newDirectChatId);
+    setPeerInfo(targetUser); // Set peerInfo for chat panel title and context
+    peerIdRef.current = targetUser.id; // Keep track of who we are chatting with
+    setIsDirectChatPanelOpen(true);
+    
+    // If currently in a call with THIS user, do nothing more.
+    // If not in a call, ensure chatState is idle to show main UI + chat panel.
+    if (chatStateRef.current !== 'connected' || peerIdRef.current !== targetUser.id) {
+       if (chatStateRef.current !== 'idle') wrappedSetChatState('idle');
+    }
+    addDebugLog(`Direct chat setup with ${targetUser.name}. Chat ID: ${newDirectChatId}. Panel open: true.`);
+  }, [sessionUser, toast, handleEndCall, isManuallyOnline, wrappedSetChatState]);
 
 
   if (pageLoading) {
@@ -1085,7 +1126,7 @@ export default function HomePage() {
       <audio ref={ringingAudioRef} src="/ringing.mp3" preload="auto" />
 
       <IncomingCallDialog
-        isOpen={!!incomingCallOfferDetails && chatState === 'idle' && isManuallyOnline}
+        isOpen={!!incomingCallOfferDetails && chatState === 'idle' && isManuallyOnline && !isDirectChatPanelOpen}
         offer={incomingCallOfferDetails}
         onAccept={handleAcceptCall}
         onDecline={handleDeclineCall}
@@ -1190,6 +1231,7 @@ export default function HomePage() {
               <OnlineUsersPanel
                 onlineUsers={onlineUsers}
                 onInitiateCall={initiateDirectCall}
+                onInitiateChat={handleInitiateDirectChat}
                 currentUserId={sessionUser.id}
               />
             </div>
@@ -1217,7 +1259,7 @@ export default function HomePage() {
                 <Button onClick={() => handleEndCall(true)} size="lg" className="flex-1" variant="destructive">
                 <PhoneOff className="mr-2 h-5 w-5" /> End Call
                 </Button>
-                {chatState === 'connected' && (
+                {(chatState === 'connected' || isDirectChatPanelOpen) && currentDirectChatId && ( // Show chat toggle if connected OR if chat panel is open via direct initiation
                     <Button 
                         onClick={() => setIsDirectChatPanelOpen(prev => !prev)} 
                         size="lg" 
@@ -1229,17 +1271,6 @@ export default function HomePage() {
                     </Button>
                 )}
             </div>
-            {chatState === 'connected' && isDirectChatPanelOpen && currentDirectChatId && sessionUser && (
-                <div className="mt-4 h-[400px]"> {/* Fixed height for chat panel */}
-                    <ChatPanel
-                        messages={directChatMessages}
-                        onSendMessage={handleSendDirectMessage}
-                        currentUserId={sessionUser.id}
-                        chatRoomId={currentDirectChatId}
-                        chatTitle={`Chat with ${(peerInfo as OnlineUser)?.name || 'Peer'}`}
-                    />
-                </div>
-            )}
              {chatState === 'connected' && peerInfo && (peerInfo as OnlineUser | UserProfile).id && authCurrentUser && (peerInfo as OnlineUser).isGoogleUser && (
               <div className="mt-4 w-full">
                 <ReportDialog
@@ -1255,6 +1286,32 @@ export default function HomePage() {
           </div>
         </div>
       )}
+      
+      {/* Standalone Direct Chat Panel - Shown when isDirectChatPanelOpen is true, irrespective of call state, but outside active call UI */}
+      {isDirectChatPanelOpen && currentDirectChatId && sessionUser && peerInfo && chatState !== 'connected' && chatState !== 'dialing' && chatState !== 'connecting' && (
+        <div className="mt-6 w-full max-w-lg p-6 bg-card rounded-xl shadow-xl">
+            <ChatPanel
+                messages={directChatMessages}
+                onSendMessage={handleSendDirectMessage}
+                currentUserId={sessionUser.id}
+                chatRoomId={currentDirectChatId}
+                chatTitle={`Chat with ${(peerInfo as OnlineUser)?.name || 'Peer'}`}
+            />
+        </div>
+      )}
+      {/* Chat Panel during active call */}
+      {chatState === 'connected' && isDirectChatPanelOpen && currentDirectChatId && sessionUser && peerInfo &&(
+        <div className="mt-4 w-full max-w-2xl h-[400px]"> 
+            <ChatPanel
+                messages={directChatMessages}
+                onSendMessage={handleSendDirectMessage}
+                currentUserId={sessionUser.id}
+                chatRoomId={currentDirectChatId}
+                chatTitle={`Chat with ${(peerInfo as OnlineUser)?.name || 'Peer'}`}
+            />
+        </div>
+      )}
+
 
       {chatState === 'revealed' && (
         <div className="w-full flex flex-col items-center gap-8 p-6 bg-card rounded-xl shadow-xl max-w-lg">

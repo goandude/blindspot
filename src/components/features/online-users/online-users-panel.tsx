@@ -5,16 +5,17 @@ import type { OnlineUser } from '@/types';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
-import { User, Video } from 'lucide-react';
+import { User, Video, MessageSquare } from 'lucide-react'; // Added MessageSquare
 import { ScrollArea } from '@/components/ui/scroll-area';
 
 interface OnlineUsersPanelProps {
   onlineUsers: OnlineUser[];
   onInitiateCall: (user: OnlineUser) => void;
+  onInitiateChat: (user: OnlineUser) => void; // New prop for initiating chat
   currentUserId: string | null;
 }
 
-export function OnlineUsersPanel({ onlineUsers, onInitiateCall, currentUserId }: OnlineUsersPanelProps) {
+export function OnlineUsersPanel({ onlineUsers, onInitiateCall, onInitiateChat, currentUserId }: OnlineUsersPanelProps) {
   const otherOnlineUsers = onlineUsers.filter(user => user.id !== currentUserId);
 
   return (
@@ -43,9 +44,15 @@ export function OnlineUsersPanel({ onlineUsers, onInitiateCall, currentUserId }:
                       )}
                     </div>
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => onInitiateCall(user)}>
-                    <Video className="mr-2 h-4 w-4" /> Call
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="outline" onClick={() => onInitiateChat(user)} aria-label={`Chat with ${user.name}`}>
+                      <MessageSquare className="h-4 w-4" />
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => onInitiateCall(user)} aria-label={`Call ${user.name}`}>
+                      <Video className="mr-2 h-4 w-4 sm:mr-0" /> 
+                      <span className="hidden sm:inline ml-2">Call</span>
+                    </Button>
+                  </div>
                 </li>
               ))}
             </ul>
