@@ -314,7 +314,7 @@ export default function RoomPage() {
           addDebugLog(`Caller: Created new stream and added track ${event.track.kind} (${event.track.id}) for ${currentPeerId}. Stream now has ${streamToUpdate.getTracks().length} tracks.`);
         }
         const participantInfo = participantsRef.current.find(p => p.id === currentPeerId);
-        newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined }); // Ensure new object for userInfo
+        newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined });
         return newMap;
       });
     };
@@ -353,12 +353,19 @@ export default function RoomPage() {
           if (pc && pc.signalingState !== 'closed') { addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists and is not closed. State: ${pc.signalingState}. Cleaning up old one.`); cleanupPeerConnection(senderId); }
           pc = new RTCPeerConnection(servers); peerConnectionsRef.current.set(senderId, pc); addDebugLog(`Created new PC for offer from ${senderId}`);
           localStream.getTracks().forEach(track => { try { pc!.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} to PC for ${senderId} (on offer)`);} catch (e:any) { addDebugLog(`Error adding local track on offer from ${senderId}: ${e.message}`); }});
-          pc.onicecandidate = event => { if (event.candidate && roomId && sessionUser?.id) { addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`); const candidatePayload: RoomSignal = { type: 'candidate', senderId: sessionUser.id!, senderName: sessionUser.name, data: event.candidate.toJSON() }; set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`)); }};
+          
+          pc.onicecandidate = event => { 
+            if (event.candidate && roomId && sessionUser?.id) { 
+              addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`); 
+              const candidatePayload: RoomSignal = { type: 'candidate', senderId: sessionUser.id!, senderName: sessionUser.name, data: event.candidate.toJSON() }; 
+              set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`)); 
+            }
+          };
           
           pc.ontrack = event => {
             const currentPeerId = senderId; 
             addDebugLog(`Callee: Ontrack from ${currentPeerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}, readyState: ${event.track.readyState}, muted: ${event.track.muted}. Streams: ${event.streams.length}`);
-             setRemoteStreams(prevMap => {
+            setRemoteStreams(prevMap => {
                 const newMap = new Map(prevMap);
                 let entry = newMap.get(currentPeerId);
                 let streamToUpdate: MediaStream;
@@ -377,7 +384,7 @@ export default function RoomPage() {
                     addDebugLog(`Callee: Created new stream and added track ${event.track.kind} (${event.track.id}) for ${currentPeerId}. Stream now has ${streamToUpdate.getTracks().length} tracks.`);
                 }
                 const participantInfo = participantsRef.current.find(p => p.id === currentPeerId);
-                newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined }); // Ensure new object for userInfo
+                newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined });
                 return newMap;
             });
           };
@@ -476,11 +483,11 @@ export default function RoomPage() {
       addDebugLog(`Error getting media: ${err.message}`);
       toast({ title: "Media Access Error", description: `Could not access camera/microphone: ${err.message}. Please check permissions.`, variant: "destructive" });
       setLocalStream(null); 
-      setIsInRoom(false); // Ensure not marked as in room if media fails
+      // No need to set isInRoom false here, as it hasn't been set true yet.
       return; 
     }
 
-    if (stream) {
+    if (stream) { // This check ensures stream is not null before proceeding
         try {
             const participantRefPath = `conferenceRooms/${roomId}/participants/${sessionUser.id}`;
             const participantDbRef = ref(db, participantRefPath);
@@ -512,8 +519,11 @@ export default function RoomPage() {
             toast({ title: "Room Join Error", description: `Could not update room participation: ${dbError.message}`, variant: "destructive" });
             stream.getTracks().forEach(track => track.stop());
             setLocalStream(null);
-            setIsInRoom(false); 
+            setIsInRoom(false); // Explicitly set false on DB error
         }
+    } else {
+        addDebugLog("handleJoinRoom: Media stream was not acquired, join process aborted before Firebase operations.");
+        // Toast for media error already shown above
     }
   };
 
@@ -561,7 +571,7 @@ export default function RoomPage() {
 
   const VideoFeed = ({ stream, user, isLocal, isVideoActuallyOn, addDebugLogProp }: { stream: MediaStream | null; user?: OnlineUser | null; isLocal?: boolean; isVideoActuallyOn: boolean; addDebugLogProp: (log: string) => void; }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
-    const [internalStreamKey, setInternalStreamKey] = useState(0); // Used to force re-render of video element
+    const [internalStreamKey, setInternalStreamKey] = useState(0); 
     
     useEffect(() => { 
       let videoElement = videoRef.current;
@@ -580,7 +590,7 @@ export default function RoomPage() {
             addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject nulled on cleanup.`);
         }
       };
-    }, [stream, user, isLocal, isVideoActuallyOn, addDebugLogProp, internalStreamKey]); // Added internalStreamKey
+    }, [stream, user, isLocal, isVideoActuallyOn, addDebugLogProp, internalStreamKey]); 
 
     useEffect(() => {
         const currentStream = stream;
@@ -594,7 +604,7 @@ export default function RoomPage() {
                  addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}: srcObject mismatch on track event. Re-assigning.`);
                  videoEl.srcObject = currentStream;
             }
-            setInternalStreamKey(prev => prev + 1); // Force re-evaluation of the main effect
+            setInternalStreamKey(prev => prev + 1); 
         };
         
         currentStream.addEventListener('addtrack', handleTrackEvent);
@@ -629,8 +639,8 @@ export default function RoomPage() {
                 <p className="text-xs sm:text-sm font-medium truncate max-w-[90%]">{user?.name || user?.id?.substring(0,8) || 'User'}</p>
                 <p className="text-xs text-gray-400">
                     {isLocal && !stream ? "Camera not available" : 
-                     (isLocal ? "Your video is off" : 
-                      (stream && !isVideoActuallyOn ? "Video off" : "No stream"))}
+                     (isLocal && !isVideoActuallyOn ? "Your video is off" : 
+                      (!isLocal && stream && !isVideoActuallyOn ? "Video off" : "No stream"))}
                 </p>
             </div>
         )}
@@ -745,3 +755,4 @@ export default function RoomPage() {
   );
 }
 
+    
