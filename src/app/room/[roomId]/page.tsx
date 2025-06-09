@@ -58,8 +58,8 @@ export default function RoomPage() {
   const CHAT_PANEL_WIDTH_CLASS = "max-w-sm sm:max-w-md"; 
   
   const addDebugLog = useCallback((message: string) => {
-    // console.log(`[Room DEBUG] ${roomId?.substring(0,4) || 'N/A'} - ${sessionUser?.id?.substring(0,4) || 'N/A'} - ${message}`);
-  }, []); 
+     console.log(`[Room DEBUG] ${roomId?.substring(0,4) || 'N/A'} - ${sessionUser?.id?.substring(0,4) || 'N/A'} - ${message}`);
+  }, [roomId, sessionUser]); 
 
   const setParticipants = useCallback((newParticipantsData: OnlineUser[] | ((prev: OnlineUser[]) => OnlineUser[])) => {
     _setParticipantsInternal(prevParticipantsList => {
@@ -294,7 +294,7 @@ export default function RoomPage() {
 
     pc.ontrack = event => {
       const currentPeerId = peerId; 
-      addDebugLog(`Caller: Ontrack from ${currentPeerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}. Streams: ${event.streams.length}`);
+      addDebugLog(`Caller: Ontrack from ${currentPeerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}, readyState: ${event.track.readyState}, muted: ${event.track.muted}. Streams: ${event.streams.length}`);
       setRemoteStreams(prevMap => {
         const newMap = new Map(prevMap);
         let entry = newMap.get(currentPeerId);
@@ -304,14 +304,17 @@ export default function RoomPage() {
           streamToUpdate = entry.stream;
           if (!streamToUpdate.getTrackById(event.track.id)) {
             streamToUpdate.addTrack(event.track);
-            addDebugLog(`Caller: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${currentPeerId}.`);
+            addDebugLog(`Caller: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${currentPeerId}. Stream now has ${streamToUpdate.getTracks().length} tracks.`);
+          } else {
+            addDebugLog(`Caller: Track ${event.track.kind} (${event.track.id}) already in stream for ${currentPeerId}.`);
           }
         } else {
-          streamToUpdate = new MediaStream([event.track]);
-          addDebugLog(`Caller: Created new stream with track ${event.track.kind} (${event.track.id}) for ${currentPeerId}.`);
+          streamToUpdate = new MediaStream();
+          streamToUpdate.addTrack(event.track);
+          addDebugLog(`Caller: Created new stream and added track ${event.track.kind} (${event.track.id}) for ${currentPeerId}. Stream now has ${streamToUpdate.getTracks().length} tracks.`);
         }
         const participantInfo = participantsRef.current.find(p => p.id === currentPeerId);
-        newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo });
+        newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined }); // Ensure new object for userInfo
         return newMap;
       });
     };
@@ -354,7 +357,7 @@ export default function RoomPage() {
           
           pc.ontrack = event => {
             const currentPeerId = senderId; 
-            addDebugLog(`Callee: Ontrack from ${currentPeerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}. Streams: ${event.streams.length}`);
+            addDebugLog(`Callee: Ontrack from ${currentPeerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}, readyState: ${event.track.readyState}, muted: ${event.track.muted}. Streams: ${event.streams.length}`);
              setRemoteStreams(prevMap => {
                 const newMap = new Map(prevMap);
                 let entry = newMap.get(currentPeerId);
@@ -364,14 +367,17 @@ export default function RoomPage() {
                     streamToUpdate = entry.stream;
                     if (!streamToUpdate.getTrackById(event.track.id)) {
                         streamToUpdate.addTrack(event.track);
-                        addDebugLog(`Callee: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${currentPeerId}.`);
+                        addDebugLog(`Callee: Added track ${event.track.kind} (${event.track.id}) to existing stream for ${currentPeerId}. Stream now has ${streamToUpdate.getTracks().length} tracks.`);
+                    } else {
+                         addDebugLog(`Callee: Track ${event.track.kind} (${event.track.id}) already in stream for ${currentPeerId}.`);
                     }
                 } else {
-                    streamToUpdate = new MediaStream([event.track]);
-                    addDebugLog(`Callee: Created new stream with track ${event.track.kind} (${event.track.id}) for ${currentPeerId}.`);
+                    streamToUpdate = new MediaStream();
+                    streamToUpdate.addTrack(event.track);
+                    addDebugLog(`Callee: Created new stream and added track ${event.track.kind} (${event.track.id}) for ${currentPeerId}. Stream now has ${streamToUpdate.getTracks().length} tracks.`);
                 }
                 const participantInfo = participantsRef.current.find(p => p.id === currentPeerId);
-                newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo });
+                newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined }); // Ensure new object for userInfo
                 return newMap;
             });
           };
@@ -470,10 +476,10 @@ export default function RoomPage() {
       addDebugLog(`Error getting media: ${err.message}`);
       toast({ title: "Media Access Error", description: `Could not access camera/microphone: ${err.message}. Please check permissions.`, variant: "destructive" });
       setLocalStream(null); 
-      return; // Exit if media cannot be acquired
+      setIsInRoom(false); // Ensure not marked as in room if media fails
+      return; 
     }
 
-    // This part only runs if stream was successfully acquired
     if (stream) {
         try {
             const participantRefPath = `conferenceRooms/${roomId}/participants/${sessionUser.id}`;
@@ -504,9 +510,9 @@ export default function RoomPage() {
         } catch (dbError: any) {
             addDebugLog(`Error setting Firebase participant data: ${dbError.message}`);
             toast({ title: "Room Join Error", description: `Could not update room participation: ${dbError.message}`, variant: "destructive" });
-            stream.getTracks().forEach(track => track.stop()); // Stop tracks if DB update fails
+            stream.getTracks().forEach(track => track.stop());
             setLocalStream(null);
-            setIsInRoom(false); // Ensure user is not marked as in room if DB update fails
+            setIsInRoom(false); 
         }
     }
   };
@@ -555,14 +561,15 @@ export default function RoomPage() {
 
   const VideoFeed = ({ stream, user, isLocal, isVideoActuallyOn, addDebugLogProp }: { stream: MediaStream | null; user?: OnlineUser | null; isLocal?: boolean; isVideoActuallyOn: boolean; addDebugLogProp: (log: string) => void; }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
+    const [internalStreamKey, setInternalStreamKey] = useState(0); // Used to force re-render of video element
     
     useEffect(() => { 
       let videoElement = videoRef.current;
       if (videoElement && stream) { 
         videoElement.srcObject = stream; 
-        addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject set. Stream has ${stream.getTracks().length} tracks (video: ${stream.getVideoTracks().length}, audio: ${stream.getAudioTracks().length}). Video on: ${isVideoActuallyOn}`);
+        addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject set. Stream ID: ${stream.id}, Tracks: ${stream.getTracks().length} (v: ${stream.getVideoTracks().length}, a: ${stream.getAudioTracks().length}). Video on: ${isVideoActuallyOn}`);
       } else {
-        addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}: stream is ${stream === null ? 'null' : 'defined but falsy'}.`);
+        addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): stream is ${stream === null ? 'null' : 'defined but falsy'}. Video on: ${isVideoActuallyOn}`);
         if (videoElement) {
             videoElement.srcObject = null; 
         }
@@ -573,12 +580,49 @@ export default function RoomPage() {
             addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject nulled on cleanup.`);
         }
       };
-    }, [stream, user, isLocal, isVideoActuallyOn, addDebugLogProp]);
+    }, [stream, user, isLocal, isVideoActuallyOn, addDebugLogProp, internalStreamKey]); // Added internalStreamKey
+
+    useEffect(() => {
+        const currentStream = stream;
+        if (!currentStream || !videoRef.current) return;
+
+        const videoEl = videoRef.current;
+
+        const handleTrackEvent = (event: MediaStreamTrackEvent) => {
+            addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}: Received '${event.type}' event for track ${event.track.kind} (${event.track.id}). Stream ID: ${currentStream.id}`);
+            if (videoEl.srcObject !== currentStream) {
+                 addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}: srcObject mismatch on track event. Re-assigning.`);
+                 videoEl.srcObject = currentStream;
+            }
+            setInternalStreamKey(prev => prev + 1); // Force re-evaluation of the main effect
+        };
+        
+        currentStream.addEventListener('addtrack', handleTrackEvent);
+        currentStream.addEventListener('removetrack', handleTrackEvent);
+
+        return () => {
+            currentStream.removeEventListener('addtrack', handleTrackEvent);
+            currentStream.removeEventListener('removetrack', handleTrackEvent);
+            addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}: Cleaned up stream track event listeners. Stream ID: ${currentStream.id}`);
+        };
+    }, [stream, user, isLocal, addDebugLogProp]);
+
 
     const FallbackAvatar = () => (<Avatar className="w-12 h-12 sm:w-16 sm:h-16 border-2 border-gray-700"><AvatarImage src={user?.photoUrl} alt={user?.name || 'User'} data-ai-hint={user?.dataAiHint || "avatar abstract"} /><AvatarFallback className="bg-gray-600 text-white">{user?.name ? user.name.charAt(0).toUpperCase() : <UsersIcon />}</AvatarFallback></Avatar>);
+    
+    const videoElementKey = stream ? `${stream.id}-${stream.getTracks().map(t => t.id).join('-')}` : (user?.id || 'no-stream-user');
+
     return (
       <div className="relative w-full aspect-video bg-gray-800 rounded-lg overflow-hidden shadow-md flex items-center justify-center">
-        <video ref={videoRef} autoPlay playsInline muted={isLocal} className="w-full h-full object-cover" style={{ display: stream && isVideoActuallyOn ? 'block' : 'none' }} />
+        <video 
+            key={videoElementKey}
+            ref={videoRef} 
+            autoPlay 
+            playsInline 
+            muted={isLocal} 
+            className="w-full h-full object-cover" 
+            style={{ display: stream && isVideoActuallyOn ? 'block' : 'none' }} 
+        />
         {(!stream || !isVideoActuallyOn) && (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-white p-2 space-y-1 sm:space-y-2">
                 <FallbackAvatar />
@@ -586,7 +630,7 @@ export default function RoomPage() {
                 <p className="text-xs text-gray-400">
                     {isLocal && !stream ? "Camera not available" : 
                      (isLocal ? "Your video is off" : 
-                      (stream ? "Video off" : "No stream"))}
+                      (stream && !isVideoActuallyOn ? "Video off" : "No stream"))}
                 </p>
             </div>
         )}
@@ -618,7 +662,7 @@ export default function RoomPage() {
               )}
               {isInRoom && Array.from(remoteStreams.entries()).map(([peerId, { stream, userInfo }]) => {
                   const remoteVideoTracks = stream.getVideoTracks();
-                  const isRemoteVideoActuallyOn = remoteVideoTracks.length > 0 && remoteVideoTracks.every(track => track.enabled && !track.muted); 
+                  const isRemoteVideoActuallyOn = remoteVideoTracks.length > 0 && remoteVideoTracks.every(track => track.enabled && !track.muted && track.readyState === 'live'); 
                   return <VideoFeed key={peerId} stream={stream} user={userInfo} isLocal={false} isVideoActuallyOn={isRemoteVideoActuallyOn} addDebugLogProp={addDebugLog} />;
               })}
                {totalStreamsToDisplay === 0 && isInRoom && (
