@@ -53,9 +53,8 @@ export default function RoomPage() {
   const [conferenceChatMessages, setConferenceChatMessages] = useState<ChatMessage[]>([]); // State for chat messages
 
   const firebaseListeners = useRef<Map<string, { ref: DatabaseReference | FirebaseQuery, callback: (snapshot: any) => void, eventType: string }>>(new Map());
-  const CHAT_PANEL_WIDTH_CLASS = "max-w-sm sm:max-w-md"; // Tailwind classes for chat panel width
-  const CHAT_PANEL_WIDTH_PX = "448px"; // Approx pixel equivalent for max-w-md (32rem * 16px/rem), sm:max-w-md (28rem)
-
+  const CHAT_PANEL_WIDTH_CLASS = "max-w-sm sm:max-w-md"; 
+  
   useEffect(() => {
     participantsRef.current = participants;
   }, [participants]);
@@ -70,13 +69,12 @@ export default function RoomPage() {
     eventType: 'value' | 'child_added' | 'child_changed' | 'child_removed' = 'value'
   ) => {
     if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function' || typeof (dbQueryOrRef as DatabaseReference).root?.toString !== 'function') {
-      addDebugLog(`WARN: addFirebaseDbListener called with invalid or incomplete dbQueryOrRef. Cannot generate path.`);
-      console.warn("addFirebaseDbListener: Invalid dbQueryOrRef passed", {dbQueryOrRef});
+      addDebugLog(`WARN: addFirebaseDbListener called with invalid or incomplete dbQueryOrRef. PathKey cannot be reliably generated.`);
+      console.warn("addFirebaseDbListener: Invalid/incomplete dbQueryOrRef passed", {dbQueryOrRef});
       return;
     }
   
-    const path = (dbQueryOrRef as DatabaseReference).toString().substring((dbQueryOrRef as DatabaseReference).root.toString().length - 1);
-    const pathKey = path + eventType;
+    const pathKey = dbQueryOrRef.toString() + '::' + eventType;
   
     if (firebaseListeners.current.has(pathKey)) {
       addDebugLog(`Listener for pathKey ${pathKey} already exists. Removing old one first.`);
@@ -86,9 +84,18 @@ export default function RoomPage() {
       }
     }
     
-    onValue(dbQueryOrRef, callback, (error: Error) => { 
-      addDebugLog(`ERROR reading from ${path} (event: ${eventType}): ${error.message}`);
-    });
+    const errorHandler = (error: Error) => { 
+        const refPathForError = dbQueryOrRef.toString();
+        addDebugLog(`ERROR reading from ${refPathForError} (event: ${eventType}): ${error.message}`);
+    };
+
+    if (eventType === 'value') {
+      onValue(dbQueryOrRef, callback, errorHandler);
+    } else {
+      addDebugLog(`ERROR: addFirebaseDbListener called with unsupported eventType: ${eventType} for pathKey: ${pathKey}`);
+      console.error(`Unsupported eventType: ${eventType} in addFirebaseDbListener`);
+      return;
+    }
   
     firebaseListeners.current.set(pathKey, { ref: dbQueryOrRef, callback, eventType });
     addDebugLog(`Added Firebase listener for pathKey: ${pathKey}`);
@@ -99,13 +106,12 @@ export default function RoomPage() {
     eventType: 'value' | 'child_added' | 'child_changed' | 'child_removed' = 'value'
   ) => {
     if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function' || typeof (dbQueryOrRef as DatabaseReference).root?.toString !== 'function') {
-      addDebugLog(`WARN: removeFirebaseDbListener called with invalid or incomplete dbQueryOrRef. Cannot generate pathKey.`);
-      console.warn("removeFirebaseDbListener: Invalid dbQueryOrRef passed", {dbQueryOrRef});
+      addDebugLog(`WARN: removeFirebaseDbListener called with invalid or incomplete dbQueryOrRef. PathKey cannot be reliably generated.`);
+      console.warn("removeFirebaseDbListener: Invalid/incomplete dbQueryOrRef passed", {dbQueryOrRef});
       return;
     }
   
-    const path = (dbQueryOrRef as DatabaseReference).toString().substring((dbQueryOrRef as DatabaseReference).root.toString().length - 1);
-    const pathKey = path + eventType;
+    const pathKey = dbQueryOrRef.toString() + '::' + eventType;
     
     const listenerEntry = firebaseListeners.current.get(pathKey);
     if (listenerEntry) {
@@ -177,10 +183,11 @@ export default function RoomPage() {
       pc.ontrack = null; pc.onicecandidate = null; pc.oniceconnectionstatechange = null; pc.onsignalingstatechange = null;
       
       pc.getSenders().forEach(sender => {
-        if (sender.track && pc.signalingState !== 'closed') {
+        // DO NOT stop sender.track here as it's the shared localStream track
+        if (pc.signalingState !== 'closed') {
           try { 
             pc.removeTrack(sender);
-            addDebugLog(`Removed track ${sender.track.kind} from sender for peer ${peerId}`);
+            addDebugLog(`Removed track ${sender.track?.kind} from sender for peer ${peerId}`);
           } catch (e) { 
             addDebugLog(`Error removing track for ${peerId} from sender: ${e}`);
           }
@@ -251,51 +258,26 @@ export default function RoomPage() {
       }
     };
 
-     pc.ontrack = event => {
-      addDebugLog(`Remote track received from ${peerId}: Kind: ${event.track.kind}, ID: ${event.track.id}. Stream(s): ${event.streams.length > 0 ? event.streams[0].id : 'N/A'}`);
-      setRemoteStreams(prevRemoteStreams => {
-        const newRemoteStreams = new Map(prevRemoteStreams);
-        let entry = newRemoteStreams.get(peerId);
-        const currentParticipantData = participantsRef.current.find(p => p.id === peerId);
-
-        if (!entry) {
-          const newStream = new MediaStream();
-          if (event.streams && event.streams[0]) {
-            event.streams[0].getTracks().forEach(track => newStream.addTrack(track));
-            addDebugLog(`Created new stream for ${peerId} from event.streams[0], tracks: ${newStream.getTracks().length}`);
-          } else {
-            newStream.addTrack(event.track);
-            addDebugLog(`Created new stream for ${peerId} from event.track, tracks: ${newStream.getTracks().length}`);
+    pc.ontrack = event => {
+      addDebugLog(`Caller: Ontrack from ${peerId}. Track kind: ${event.track.kind}, ID: ${event.track.id}.`);
+      setRemoteStreams(prev => {
+        const newMap = new Map(prev);
+        let entry = newMap.get(peerId);
+        let stream: MediaStream;
+        
+        if (entry) {
+          stream = entry.stream;
+          if (!stream.getTrackById(event.track.id)) {
+            stream.addTrack(event.track);
+            addDebugLog(`Caller: Added track ${event.track.kind} to existing stream for ${peerId}. Stream tracks: ${stream.getTracks().length}`);
           }
-          entry = { stream: newStream, userInfo: currentParticipantData };
-          newRemoteStreams.set(peerId, entry);
         } else {
-          let trackAddedToExistingStream = false;
-          const existingStreamTracks = entry.stream.getTracks().map(t => t.id);
-          if (event.streams && event.streams[0]) {
-             event.streams[0].getTracks().forEach(track => {
-                if (!existingStreamTracks.includes(track.id)) {
-                    entry!.stream.addTrack(track);
-                    trackAddedToExistingStream = true;
-                }
-             });
-          } else {
-            if (!existingStreamTracks.includes(event.track.id)) {
-                entry!.stream.addTrack(event.track);
-                trackAddedToExistingStream = true;
-            }
-          }
-          if (trackAddedToExistingStream) addDebugLog(`Added track(s) to existing stream for ${peerId}. Total tracks: ${entry.stream.getTracks().length}`);
-
-          if (currentParticipantData && (!entry.userInfo || entry.userInfo.id !== currentParticipantData.id || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl)) {
-            newRemoteStreams.set(peerId, { ...entry, userInfo: currentParticipantData }); 
-            addDebugLog(`Updated userInfo for ${peerId}. New name: ${currentParticipantData?.name}`);
-          } else if (!currentParticipantData && entry.userInfo) {
-            newRemoteStreams.set(peerId, { ...entry, userInfo: undefined });
-            addDebugLog(`Cleared userInfo for ${peerId} as participant data not found.`);
-          }
+          stream = new MediaStream([event.track]);
+          addDebugLog(`Caller: Created new stream with track ${event.track.kind} for ${peerId}. Stream tracks: ${stream.getTracks().length}`);
         }
-        return newRemoteStreams;
+        const participantInfo = participantsRef.current.find(p => p.id === peerId);
+        newMap.set(peerId, { stream, userInfo: participantInfo });
+        return newMap;
       });
     };
 
@@ -334,30 +316,30 @@ export default function RoomPage() {
           pc = new RTCPeerConnection(servers); peerConnectionsRef.current.set(senderId, pc); addDebugLog(`Created new PC for offer from ${senderId}`);
           localStream.getTracks().forEach(track => { try { pc!.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} to PC for ${senderId} (on offer)`);} catch (e:any) { addDebugLog(`Error adding local track on offer from ${senderId}: ${e.message}`); }});
           pc.onicecandidate = event => { if (event.candidate && roomId && sessionUser?.id) { addDebugLog(`Generated ICE candidate for ${senderId} (replying to offer): ${event.candidate.candidate.substring(0,30)}...`); const candidatePayload: RoomSignal = { type: 'candidate', senderId: sessionUser.id!, senderName: sessionUser.name, data: event.candidate.toJSON() }; set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), candidatePayload).catch(e => addDebugLog(`Error sending ICE to ${senderId} (on offer): ${e.message}`)); }};
+          
           pc.ontrack = event => {
-            addDebugLog(`Remote track received from ${senderId} (on offer path): Kind: ${event.track.kind}, ID: ${event.track.id}. Stream has ${event.streams[0]?.getTracks().length || 0} tracks.`);
-            setRemoteStreams(prevRemoteStreams => {
-              const newRemoteStreams = new Map(prevRemoteStreams); let entry = newRemoteStreams.get(senderId); const currentParticipantData = participantsRef.current.find(p => p.id === senderId);
-              if (!entry) { 
-                const newStream = new MediaStream();
-                if (event.streams && event.streams[0]) { event.streams[0].getTracks().forEach(track => newStream.addTrack(track)); } else { newStream.addTrack(event.track); }
-                entry = { stream: newStream, userInfo: currentParticipantData }; newRemoteStreams.set(senderId, entry); 
-                addDebugLog(`Created new stream entry for ${senderId} via offer path, tracks: ${newStream.getTracks().length}`); 
-              } else {
-                let trackAdded = false; const existingStreamTracks = entry.stream.getTracks().map(t => t.id);
-                if (event.streams && event.streams[0]) { event.streams[0].getTracks().forEach(track => { if(!existingStreamTracks.includes(track.id)) { entry!.stream.addTrack(track); trackAdded = true; }});
-                } else { if(!existingStreamTracks.includes(event.track.id)) { entry!.stream.addTrack(event.track); trackAdded = true; }}
-                if (trackAdded) addDebugLog(`Added track(s) to existing stream for ${senderId} via offer path. Total tracks: ${entry.stream.getTracks().length}`);
-                if (currentParticipantData && (!entry.userInfo || entry.userInfo.id !== currentParticipantData.id || entry.userInfo.name !== currentParticipantData.name || entry.userInfo.photoUrl !== currentParticipantData.photoUrl)) {
-                  newRemoteStreams.set(senderId, { ...entry, userInfo: currentParticipantData }); addDebugLog(`Updated userInfo for ${senderId} via offer path. New name: ${currentParticipantData?.name}`);
-                } else if (!currentParticipantData && entry.userInfo) {
-                    newRemoteStreams.set(senderId, { ...entry, userInfo: undefined });
-                    addDebugLog(`Cleared userInfo for ${senderId} via offer path as participant data not found.`);
+            addDebugLog(`Callee: Ontrack from ${senderId}. Track kind: ${event.track.kind}, ID: ${event.track.id}.`);
+            setRemoteStreams(prev => {
+              const newMap = new Map(prev);
+              let entry = newMap.get(senderId);
+              let stream: MediaStream;
+
+              if (entry) {
+                stream = entry.stream;
+                if (!stream.getTrackById(event.track.id)) {
+                  stream.addTrack(event.track);
+                  addDebugLog(`Callee: Added track ${event.track.kind} to existing stream for ${senderId}. Stream tracks: ${stream.getTracks().length}`);
                 }
+              } else {
+                stream = new MediaStream([event.track]);
+                addDebugLog(`Callee: Created new stream with track ${event.track.kind} for ${senderId}. Stream tracks: ${stream.getTracks().length}`);
               }
-              return newRemoteStreams;
+              const participantInfo = participantsRef.current.find(p => p.id === senderId);
+              newMap.set(senderId, { stream, userInfo: participantInfo });
+              return newMap;
             });
           };
+
           pc.oniceconnectionstatechange = () => { 
             const iceState = pc!.iceConnectionState;
             addDebugLog(`ICE state for ${senderId} (on offer path): ${iceState}`); 
@@ -598,3 +580,5 @@ export default function RoomPage() {
     </MainLayout>
   );
 }
+
+    
