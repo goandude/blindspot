@@ -8,7 +8,7 @@ import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { ProfileSetupDialog } from '@/components/features/profile/profile-setup-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
 import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile, ChatMessage, RoomSignal } from '@/types';
-import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff, Link2, Users as UsersIcon, MessageSquare, ArrowLeft } from 'lucide-react';
+import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff, Link2, Users as UsersIcon, MessageSquare, ArrowLeft, AlertCircle } from 'lucide-react';
 import { db } from '@/lib/firebase';
 import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get, query, limitToLast, orderByKey, type Query as FirebaseQuery } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
@@ -22,7 +22,7 @@ import { IncomingCallDialog } from '@/components/features/call/incoming-call-dia
 import { useRouter } from 'next/navigation';
 import { Input } from '@/components/ui/input';
 import { ChatPanel } from '@/components/features/chat/chat-panel';
-import { ChatContactList } from '@/components/features/chat/chat-contact-list'; // New import
+import { ChatContactList } from '@/components/features/chat/chat-contact-list';
 import { cn } from '@/lib/utils';
 
 
@@ -37,7 +37,13 @@ const servers = {
 
 const generateAnonymousSessionId = () => Math.random().toString(36).substring(2, 10);
 
-const getDirectChatId = (userId1: string, userId2: string): string => {
+const getDirectChatId = (userId1: string | undefined, userId2: string | undefined): string => {
+  // Guard against undefined user IDs, though this should ideally not happen
+  // if sessionUser and selectedChatPeer are valid.
+  if (!userId1 || !userId2) {
+    console.warn(`getDirectChatId called with undefined user ID(s): User1: ${userId1}, User2: ${userId2}`);
+    return `error_invalid_users_${Math.random().toString(36).substring(2,7)}`;
+  }
   return [userId1, userId2].sort().join('_');
 };
 
@@ -52,7 +58,7 @@ export default function HomePage() {
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
-  const [peerInfo, setPeerInfo] = useState<OnlineUser | UserProfile | null>(null); // For call context AND selected chat peer
+  const [peerInfo, setPeerInfo] = useState<OnlineUser | UserProfile | null>(null);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
   const [isProfileEditDialogOpen, setIsProfileEditDialogOpen] = useState(false);
@@ -61,13 +67,13 @@ export default function HomePage() {
   const [createdRoomId, setCreatedRoomId] = useState<string | null>(null);
   const [roomLink, setRoomLink] = useState<string | null>(null);
 
-  // States for dual-panel chat
   const [activeChatPeers, setActiveChatPeers] = useState<OnlineUser[]>([]);
   const [selectedChatPeer, setSelectedChatPeer] = useState<OnlineUser | null>(null);
-  const [isChatUIVisible, setIsChatUIVisible] = useState(false); // Controls the main dual-panel chat UI
+  const [isChatUIVisible, setIsChatUIVisible] = useState(false);
   const [directChatMessages, setDirectChatMessages] = useState<ChatMessage[]>([]);
   const [currentDirectChatId, setCurrentDirectChatId] = useState<string | null>(null);
-  const [isInCallChatOpen, setIsInCallChatOpen] = useState(false); // For chat panel during active call
+  const [isInCallChatOpen, setIsInCallChatOpen] = useState(false);
+  const [unreadChats, setUnreadChats] = useState<Set<string>>(new Set());
 
 
   const { toast } = useToast();
@@ -85,7 +91,7 @@ export default function HomePage() {
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const roomIdRef = useRef<string | null>(null);
-  const peerIdRef = useRef<string | null>(null); // Tracks the peer in an active *call*
+  const peerIdRef = useRef<string | null>(null);
   const isCallerRef = useRef<boolean>(false);
   const ringingAudioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -94,6 +100,8 @@ export default function HomePage() {
   const currentSessionUserIdRef = useRef<string | null>(null);
   const isPageVisibleRef = useRef<boolean>(true);
   const incomingCallOfferDetailsRef = useRef<IncomingCallOffer | null>(null);
+  const previousDirectChatIdRef = useRef<string | null>(null);
+
 
   useEffect(() => {
     incomingCallOfferDetailsRef.current = incomingCallOfferDetails;
@@ -105,6 +113,7 @@ export default function HomePage() {
     let prefix = currentSId ? `[${currentSId.substring(0, 4)}] ` : '[N/A] ';
     const logEntry = `[${timestamp}] ${prefix}${message}`;
     setDebugLogs(prevLogs => [logEntry, ...prevLogs].slice(0, 100));
+    // console.log(logEntry); // Optional: also log to browser console
   }, []);
 
   useEffect(() => {
@@ -254,6 +263,7 @@ export default function HomePage() {
         addDebugLog(`ERROR reading from ${refPathForError} (event: ${eventType}): ${error.message}`);
         toast({ title: "Firebase Error", description: `Failed to listen to ${refPathForError} (event: ${eventType}). Check console.`, variant: "destructive" });
     };
+    
     if (eventType === 'value') {
       onValue(dbQueryOrRef, actualCallback, errorHandler);
     } else {
@@ -309,7 +319,7 @@ export default function HomePage() {
   const cleanupCallData = useCallback(async () => {
     const myId = currentSessionUserIdRef.current;
     const currentRoomId = roomIdRef.current;
-    const currentCallPeerId = peerIdRef.current; // Use a different name to avoid confusion with chat peer
+    const currentCallPeerId = peerIdRef.current;
     addDebugLog(`Cleaning up call data. MyID: ${myId}, Room: ${currentRoomId}, CallPeer: ${currentCallPeerId}`);
     if (currentRoomId) {
       const roomSignalsPath = `callSignals/${currentRoomId}`;
@@ -376,17 +386,12 @@ export default function HomePage() {
       addDebugLog(`Call ended. Transitioning to 'idle' state (no reveal or peerId missing/not connected).`);
     }
     roomIdRef.current = null;
-    peerIdRef.current = null; // Clear active call peer
+    peerIdRef.current = null;
     isCallerRef.current = false;
-    setIsInCallChatOpen(false); // Close in-call chat panel
+    setIsInCallChatOpen(false);
 
-    // Do NOT clear general chat UI (selectedChatPeer, currentDirectChatId etc.) here,
-    // as it's managed separately unless the revealed peer is the same as selectedChatPeer.
     if (chatStateRef.current === 'revealed' && selectedChatPeer && peerInfo && selectedChatPeer.id === peerInfo.id) {
       // If revealed peer is the one in active chat view, maybe do nothing or keep it.
-      // Or, if we want to go "back" from revealed to the chat list:
-      // setIsChatUIVisible(true); // Keep chat UI open, but no specific peer selected by default
-      // setSelectedChatPeer(null); // Or keep them selected if desired.
     }
 
   }, [cleanupWebRTC, cleanupCallData, onlineUsers, peerInfo, selectedChatPeer, removeFirebaseListener, addDebugLog, wrappedSetChatState, authCurrentUser, stopRingingSound]);
@@ -431,7 +436,6 @@ export default function HomePage() {
         if (['connecting', 'dialing'].includes(chatStateRef.current)) {
           addDebugLog("ICE fully connected/completed, setting chat state to 'connected'.");
           wrappedSetChatState('connected');
-          // No need to set direct chat ID here, that's for general chat UI
         }
       } else if (['failed', 'disconnected', 'closed'].includes(iceState)) {
         if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
@@ -489,7 +493,7 @@ export default function HomePage() {
       addDebugLog(`In non-idle state (${chatStateRef.current}), ending existing call/chat before initiating new one.`);
       await handleEndCall(false);
     }
-    setIsChatUIVisible(false); // Hide general chat UI when a call starts
+    setIsChatUIVisible(false);
     setSelectedChatPeer(null);
     setIsInCallChatOpen(false);
 
@@ -573,7 +577,7 @@ export default function HomePage() {
     }
     addDebugLog(`Callee ${sUser.id}: Processing incoming offer from ${offerData.callerName} (${offerData.callerId}). Room: ${offerData.roomId}.`);
     
-    setIsChatUIVisible(false); // Hide general chat UI when a call starts
+    setIsChatUIVisible(false);
     setSelectedChatPeer(null);
     setIsInCallChatOpen(false);
 
@@ -809,7 +813,7 @@ export default function HomePage() {
             return;
         }
         
-        if (chatStateRef.current !== 'idle' || isChatUIVisible) { // Also check if general chat UI is open
+        if (chatStateRef.current !== 'idle' || isChatUIVisible) {
           addDebugLog(`WARN: ${myId} received offer from ${newOfferData.callerId} (room ${newOfferData.roomId}) while busy (state ${chatStateRef.current} or general chat UI open). Removing this offer from DB.`);
           if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
              remove(incomingCallDbRef).catch(e => addDebugLog(`WARN: Error removing offer (user busy) by ${myId} from DB: ${e.message || e}`));
@@ -848,34 +852,39 @@ export default function HomePage() {
   }, [currentSessionUserIdRef.current, isManuallyOnline, isChatUIVisible]);
 
 
-  // Listener for Direct Chat Messages (based on selectedChatPeer now)
+  // Effect 1: Manages currentDirectChatId based on selectedChatPeer
   useEffect(() => {
-    if (!selectedChatPeer || !sessionUser?.id) {
-      if (currentDirectChatId) { // If a chat ID was previously active, clean its listener
-        const oldChatPath = `directChats/${currentDirectChatId}/messages`;
-        removeFirebaseListener(query(ref(db, oldChatPath), orderByKey(), limitToLast(50)), 'value');
-        setDirectChatMessages([]);
+    if (!sessionUser || !selectedChatPeer) {
+      if (currentDirectChatId) { // Only clear if there was an active chat
+        addDebugLog(`ChatId Effect: Clearing chat ID (${currentDirectChatId}) and messages due to no session/selected peer.`);
         setCurrentDirectChatId(null);
+        setDirectChatMessages([]); // Clear messages for the old chat
       }
       return;
     }
 
     const newDirectChatId = getDirectChatId(sessionUser.id, selectedChatPeer.id);
-    if (newDirectChatId === currentDirectChatId) { // Already listening to this chat
-      addDebugLog(`Direct chat listener: Already listening to ${newDirectChatId}.`);
+    addDebugLog(`ChatId Effect: For peer ${selectedChatPeer.name}, sessionUser ${sessionUser.name}. Calculated newDirectChatId: ${newDirectChatId}. Current: ${currentDirectChatId}`);
+
+    if (newDirectChatId !== currentDirectChatId) {
+      addDebugLog(`ChatId Effect: Chat ID changing from ${currentDirectChatId || 'null'} to ${newDirectChatId}. Clearing messages.`);
+      setCurrentDirectChatId(newDirectChatId);
+      setDirectChatMessages([]); // Crucial: Clear messages when chat ID changes for the new selection
+    }
+  }, [selectedChatPeer, sessionUser, addDebugLog]); // Corrected dependency array
+
+
+  // Effect 2: Listens for new messages for the currentDirectChatId
+  useEffect(() => {
+    if (!currentDirectChatId) {
+      addDebugLog(`Message Listener Effect: No currentDirectChatId. Listener not attached.`);
+      // If there was a previous chat ID, its listener should have been cleaned up
+      // by this effect's own cleanup when currentDirectChatId changed.
       return;
     }
 
-    // Clean up old listener if switching chats
-    if (currentDirectChatId) {
-      const oldChatPath = `directChats/${currentDirectChatId}/messages`;
-      removeFirebaseListener(query(ref(db, oldChatPath), orderByKey(), limitToLast(50)), 'value');
-    }
-    
-    setCurrentDirectChatId(newDirectChatId);
-    setDirectChatMessages([]); // Clear messages when switching
-    addDebugLog(`Attaching direct chat listener for chat ID: ${newDirectChatId}`);
-    const directChatMessagesQuery = query(ref(db, `directChats/${newDirectChatId}/messages`), orderByKey(), limitToLast(50));
+    addDebugLog(`Message Listener Effect: Attaching listener for chat ID: ${currentDirectChatId}`);
+    const directChatMessagesQuery = query(ref(db, `directChats/${currentDirectChatId}/messages`), orderByKey(), limitToLast(50));
     
     const directChatCallback = (snapshot: any) => {
       const messages: ChatMessage[] = [];
@@ -883,16 +892,18 @@ export default function HomePage() {
         messages.push({ id: childSnapshot.key!, ...childSnapshot.val() } as ChatMessage);
       });
       setDirectChatMessages(messages);
-      addDebugLog(`Direct chat messages updated for ${newDirectChatId}. Count: ${messages.length}`);
+      addDebugLog(`Message Listener Effect: Messages updated for ${currentDirectChatId}. Count: ${messages.length}. First message text (if any): ${messages.length > 0 ? messages[0].text : 'N/A'}`);
     };
 
     addFirebaseListener(directChatMessagesQuery, directChatCallback, 'value');
+    // Store the current chat ID for which this listener was set up
+    const listenerChatId = currentDirectChatId; 
 
     return () => {
-      addDebugLog(`Cleaning up direct chat listener for chat ID: ${newDirectChatId}`);
+      addDebugLog(`Message Listener Effect: Cleaning up listener for chat ID: ${listenerChatId}`);
       removeFirebaseListener(directChatMessagesQuery, 'value');
     };
-  }, [selectedChatPeer, sessionUser?.id, addFirebaseListener, removeFirebaseListener, addDebugLog, currentDirectChatId]);
+  }, [currentDirectChatId, addFirebaseListener, removeFirebaseListener, addDebugLog]);
 
 
   useEffect(() => {
@@ -952,10 +963,6 @@ export default function HomePage() {
     wrappedSetChatState('idle'); setPeerInfo(null);
     peerIdRef.current = null; roomIdRef.current = null; isCallerRef.current = false;
     cleanupWebRTC(); await cleanupCallData();
-    // Do not reset general chat UI (isChatUIVisible, selectedChatPeer) here
-    // as user might want to continue chatting with the revealed peer
-    // or go back to the chat list.
-    // Only reset in-call chat.
     setIsInCallChatOpen(false);
   };
 
@@ -1039,7 +1046,22 @@ export default function HomePage() {
   };
 
   const handleSendDirectMessage = useCallback(async (text: string, attachments?: File[]) => {
-    if (!currentDirectChatId || !sessionUser || text.trim() === '') return;
+    addDebugLog(`handleSendDirectMessage: Attempting to send. currentDirectChatId: "${currentDirectChatId}", sessionUser ID: "${sessionUser?.id}", text: "${text}"`);
+    if (!currentDirectChatId) {
+      addDebugLog("handleSendDirectMessage: Aborted - currentDirectChatId is null/empty.");
+      toast({ title: "Chat Error", description: "No active chat selected.", variant: "destructive" });
+      return;
+    }
+    if (!sessionUser || !sessionUser.id) {
+      addDebugLog("handleSendDirectMessage: Aborted - sessionUser is null or has no ID.");
+      toast({ title: "Chat Error", description: "You must be logged in to send messages.", variant: "destructive" });
+      return;
+    }
+    if (text.trim() === '') {
+      addDebugLog("handleSendDirectMessage: Aborted - message text is empty.");
+      return;
+    }
+
     if (attachments && attachments.length > 0) {
         toast({title: "Note", description: "File attachments not yet implemented for direct chat.", variant: "default"});
     }
@@ -1052,15 +1074,15 @@ export default function HomePage() {
         timestamp: serverTimestamp(),
     };
     try {
-        await push(ref(db, `directChats/${currentDirectChatId}/messages`), messageData);
-        addDebugLog(`Sent direct message to ${currentDirectChatId}: "${text}"`);
+        const messageRef = push(ref(db, `directChats/${currentDirectChatId}/messages`), messageData);
+        addDebugLog(`Sent direct message to ${currentDirectChatId} with key ${messageRef.key}: "${text}"`);
     } catch (error: any) {
-        addDebugLog(`Error sending direct message: ${error.message}`);
-        toast({ title: "Chat Error", description: "Could not send message.", variant: "destructive" });
+        addDebugLog(`Error sending direct message to ${currentDirectChatId}: ${error.message}`);
+        toast({ title: "Chat Error", description: `Could not send message: ${error.message}`, variant: "destructive" });
     }
   }, [currentDirectChatId, sessionUser, toast, addDebugLog]);
 
-  // For dual-panel chat UI
+
   const handleInitiateOrSelectChat = useCallback((targetUser: OnlineUser) => {
     if (!sessionUser) {
         addDebugLog("handleInitiateOrSelectChat: No session user.");
@@ -1072,7 +1094,7 @@ export default function HomePage() {
         toast({ title: "Error", description: "Cannot chat with yourself.", variant: "default" });
         return;
     }
-    if (!isManuallyOnline && chatState === 'idle') { // Only block if trying to start new chat while offline & idle
+    if (!isManuallyOnline && chatState === 'idle') {
       toast({ title: "You are Offline", description: "Go online to start new chats.", variant: "default" });
       addDebugLog(`Chat attempt by ${sessionUser.id} to ${targetUser.id} blocked: user is manually offline and idle.`);
       return;
@@ -1091,10 +1113,16 @@ export default function HomePage() {
       if (prevPeers.find(p => p.id === targetUser.id)) return prevPeers;
       return [...prevPeers, targetUser];
     });
-    setSelectedChatPeer(targetUser); // This will trigger useEffect for messages
-    setPeerInfo(targetUser); // For ChatPanel title context
-    setIsChatUIVisible(true); // Show the dual-panel UI
+    setSelectedChatPeer(targetUser);
+    setPeerInfo(targetUser);
+    setIsChatUIVisible(true);
     addDebugLog(`Direct chat setup with ${targetUser.name}. Panel open: true.`);
+
+    setUnreadChats(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(targetUser.id);
+      return newSet;
+    });
   }, [sessionUser, toast, handleEndCall, isManuallyOnline, wrappedSetChatState, addDebugLog]);
 
 
@@ -1153,11 +1181,11 @@ export default function HomePage() {
   
   const mainPageContent = () => {
     if (chatState === 'idle' && !incomingCallOfferDetails) {
-      if (isChatUIVisible && selectedChatPeer && currentDirectChatId) { // Dual Panel Chat
+      if (isChatUIVisible && selectedChatPeer && sessionUser) { // Ensure sessionUser for ChatPanel
         return (
           <div className="flex flex-col w-full max-w-4xl h-[70vh] md:h-[80vh] bg-card rounded-xl shadow-xl overflow-hidden">
             <div className="p-2 border-b">
-                <Button variant="outline" size="sm" onClick={() => { setIsChatUIVisible(false); setSelectedChatPeer(null); setCurrentDirectChatId(null);}}>
+                <Button variant="outline" size="sm" onClick={() => { setIsChatUIVisible(false); setSelectedChatPeer(null);}}>
                     <ArrowLeft className="mr-2 h-4 w-4" /> Back to Users
                 </Button>
             </div>
@@ -1166,26 +1194,33 @@ export default function HomePage() {
                 <ChatContactList
                   peers={activeChatPeers}
                   selectedPeerId={selectedChatPeer.id}
+                  currentUserId={sessionUser.id}
+                  unreadChats={unreadChats}
                   onSelectPeer={(peer) => {
+                    addDebugLog(`ChatContactList onSelectPeer: Selected ${peer.name} (${peer.id})`);
                     setSelectedChatPeer(peer);
-                    setPeerInfo(peer); // Update context for ChatPanel title
+                    setPeerInfo(peer); 
+                    setUnreadChats(prev => { const newSet = new Set(prev); newSet.delete(peer.id); return newSet; });
                   }}
+                  onCloseChatList={() => setIsChatUIVisible(false)}
                 />
               </div>
               <div className="flex-1 h-full border-l">
                 <ChatPanel
+                  key={currentDirectChatId || 'no-chat-selected'} 
                   messages={directChatMessages}
                   onSendMessage={handleSendDirectMessage}
                   currentUserId={sessionUser.id}
                   chatRoomId={currentDirectChatId}
                   chatTitle={`Chat with ${selectedChatPeer.name}`}
                   isLoading={!currentDirectChatId}
+                  onClose={() => { setIsChatUIVisible(false); setSelectedChatPeer(null);}}
                 />
               </div>
             </div>
           </div>
         );
-      } else { // Default Idle View (Online Users, etc.)
+      } else {
         return (
           <div className="flex flex-col items-center gap-6 p-6 bg-card rounded-xl shadow-xl w-full max-w-lg">
             <Card className="w-full shadow-md border-primary/50">
@@ -1242,13 +1277,14 @@ export default function HomePage() {
                 <p className="text-sm text-muted-foreground">Click "Go Online" above to see users and make calls/chats.</p>
               </div>
             )}
-            {isManuallyOnline && (
+            {isManuallyOnline && sessionUser && (
               <div className="w-full mt-4">
                 <OnlineUsersPanel
                   onlineUsers={onlineUsers}
                   onInitiateCall={initiateDirectCall}
                   onInitiateChat={handleInitiateOrSelectChat}
                   currentUserId={sessionUser.id}
+                  unreadChats={unreadChats}
                 />
               </div>
             )}
@@ -1261,7 +1297,7 @@ export default function HomePage() {
           </div>
         );
       }
-    } else if (chatState === 'dialing' || chatState === 'connecting' || chatState === 'connected') { // Video Call UI
+    } else if (chatState === 'dialing' || chatState === 'connecting' || chatState === 'connected') {
       return (
         <div className="w-full flex flex-col items-center gap-4">
           <div className="w-full max-w-2xl">
@@ -1278,7 +1314,14 @@ export default function HomePage() {
                 </Button>
                 {(chatState === 'connected') && (
                     <Button 
-                        onClick={() => setIsInCallChatOpen(prev => !prev)} 
+                        onClick={() => {
+                             setIsInCallChatOpen(prev => !prev);
+                             if (!isInCallChatOpen && peerInfo && peerInfo.id && sessionUser?.id) {
+                                // Ensure chat ID is set for in-call chat
+                                const callPeer = onlineUsers.find(u => u.id === peerIdRef.current) || (peerInfo as OnlineUser);
+                                if (callPeer) setSelectedChatPeer(callPeer); // This will trigger effect to set currentDirectChatId
+                             }
+                        }} 
                         size="lg" 
                         variant="outline" 
                         className="flex-1"
@@ -1300,14 +1343,14 @@ export default function HomePage() {
                 />
               </div>
             )}
-             {/* Chat Panel during active call */}
             {chatState === 'connected' && isInCallChatOpen && currentDirectChatId && sessionUser && peerInfo &&(
               <div className="mt-4 w-full max-w-2xl h-[400px]"> 
                   <ChatPanel
+                      key={currentDirectChatId + "-in-call"}
                       messages={directChatMessages}
                       onSendMessage={handleSendDirectMessage}
                       currentUserId={sessionUser.id}
-                      chatRoomId={currentDirectChatId} // This ID might need to be based on peerIdRef.current if different from selectedChatPeer
+                      chatRoomId={currentDirectChatId}
                       chatTitle={`Chat with ${(peerInfo as OnlineUser)?.name || 'Peer'}`}
                   />
               </div>
@@ -1315,7 +1358,7 @@ export default function HomePage() {
           </div>
         </div>
       );
-    } else if (chatState === 'revealed') { // Revealed State UI
+    } else if (chatState === 'revealed') {
       return (
         <div className="w-full flex flex-col items-center gap-8 p-6 bg-card rounded-xl shadow-xl max-w-lg">
           <h2 className="text-3xl font-semibold text-primary">Call Ended</h2>
@@ -1357,7 +1400,7 @@ export default function HomePage() {
         </div>
       );
     }
-    return null; // Fallback for unhandled states or if incomingCallOfferDetails is present
+    return null;
   };
 
   return (
@@ -1413,3 +1456,6 @@ export default function HomePage() {
     </MainLayout>
   );
 }
+
+          
+        
