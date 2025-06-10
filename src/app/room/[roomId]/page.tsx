@@ -10,7 +10,7 @@ import { useAuth } from '@/hooks/use-auth';
 import { db } from '@/lib/firebase';
 import { ref, set, onValue, off, remove, serverTimestamp, type DatabaseReference, push, child, query, limitToLast, orderByKey, type Query as FirebaseQuery } from 'firebase/database';
 import type { OnlineUser, UserProfile, RoomSignal, ChatMessage, RTCIceCandidateJSON } from '@/types';
-import { Video as VideoIcon, Mic, MicOff, VideoOff as VideoOffIcon, PhoneOff, Users as UsersIcon, Copy, AlertTriangle, MessageSquare, Home } from 'lucide-react'; // Added Home
+import { Video as VideoIcon, Mic, MicOff, VideoOff as VideoOffIcon, PhoneOff, Users as UsersIcon, Copy, AlertTriangle, MessageSquare, Home } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ChatPanel } from '@/components/features/chat/chat-panel';
@@ -59,7 +59,7 @@ export default function RoomPage() {
   const CHAT_PANEL_WIDTH_CLASS = "max-w-sm sm:max-w-md"; 
   
   const addDebugLog = useCallback((message: string) => {
-     console.log(`[Room DEBUG] ${roomId?.substring(0,4) || 'N/A'} - ${sessionUser?.id?.substring(0,4) || 'N/A'} - ${message}`);
+     console.log(`[Room DEBUG] ${roomId?.substring(0,4) || 'N/A'} - ${sessionUser?.id?.substring(0,4) || sessionUser?.name?.substring(0,4) || 'N/A'} - ${message}`);
   }, [roomId, sessionUser]); 
 
   const setParticipants = useCallback((newParticipantsData: OnlineUser[] | ((prev: OnlineUser[]) => OnlineUser[])) => {
@@ -75,7 +75,7 @@ export default function RoomPage() {
 
             participantsRef.current.forEach(prevUser => {
                 if (!currentUserIds.has(prevUser.id) && prevUser.id !== currentSUserId) {
-                     setTimeout(() => {
+                     setTimeout(() => { // Defer toast to avoid updates during render
                         toast({
                             title: "User Left",
                             description: `${prevUser.name || 'A user'} has left the room.`,
@@ -204,6 +204,17 @@ export default function RoomPage() {
     }
   }, [authCurrentUser, authUserProfile, authLoading, addDebugLog, sessionUser, isLoading]);
 
+  const isInRoomRef = useRef(isInRoom);
+  const localStreamRef = useRef(localStream);
+
+  useEffect(() => {
+    isInRoomRef.current = isInRoom;
+  }, [isInRoom]);
+
+  useEffect(() => {
+    localStreamRef.current = localStream;
+  }, [localStream]);
+
 
   const cleanupPeerConnection = useCallback((peerId: string) => {
     addDebugLog(`Cleaning up peer connection for ${peerId}`);
@@ -234,59 +245,123 @@ export default function RoomPage() {
   }, [addDebugLog]);
 
   const handleLeaveRoom = useCallback(async () => {
-    addDebugLog(`Leaving room ${roomId}. Current user: ${sessionUser?.id}`);
-    setIsInRoom(false);
-    if (localStream) { 
-      localStream.getTracks().forEach(track => {
-        track.stop();
-        addDebugLog(`Stopped local track: ${track.kind} (${track.id})`);
-      }); 
-      setLocalStream(null); 
-      addDebugLog("Local stream stopped and nulled."); 
+    addDebugLog(`Attempting to leave room ${roomId}. User: ${sessionUser?.id}, IsInRoomRef: ${isInRoomRef.current}, LocalStreamRef: ${!!localStreamRef.current}`);
+    
+    if (!isInRoomRef.current && !localStreamRef.current && peerConnectionsRef.current.size === 0) {
+      addDebugLog("handleLeaveRoom: Already left or significantly cleaned up. Aborting further operations.");
+      if (router) router.push('/'); // Ensure navigation if somehow stuck
+      return;
     }
-    peerConnectionsRef.current.forEach((_, peerId) => { addDebugLog(`Cleaning up PC for ${peerId} during leave room.`); cleanupPeerConnection(peerId); });
+
+    const currentLocalStreamForCleanup = localStreamRef.current; // Capture for track stopping
+
+    setIsInRoom(false); // Update state first
+    setLocalStream(null); // This should trigger VideoFeed to nullify its srcObject
+    addDebugLog("Local stream state set to null. isInRoom state set to false.");
+
+    if (currentLocalStreamForCleanup) { 
+      currentLocalStreamForCleanup.getTracks().forEach(track => {
+        track.stop();
+        addDebugLog(`Stopped local track: ${track.kind} (${track.id}) from captured stream.`);
+      }); 
+      addDebugLog("Original local stream tracks stopped."); 
+    } else {
+      addDebugLog("No local stream was active to stop tracks for.");
+    }
+
+    peerConnectionsRef.current.forEach((pc, peerIdToClean) => { 
+      addDebugLog(`Cleaning up PC for ${peerIdToClean} during leave room (iterating PCs).`); 
+      if (pc.signalingState !== 'closed') pc.close();
+    });
     peerConnectionsRef.current.clear();
     earlyCandidatesRef.current.clear();
-    setRemoteStreams(new Map());
-    addDebugLog("All peer connections cleaned up.");
+    setRemoteStreams(new Map()); // Clear all remote streams
+    addDebugLog("All peer connections refs cleared and remote streams state reset.");
     
-    firebaseListeners.current.forEach(({ ref: fRef, callback, eventType }) => { 
+    addDebugLog(`Cleaning up ALL (${firebaseListeners.current.size}) Firebase listeners during leave room.`);
+    firebaseListeners.current.forEach(({ ref: fRef, callback, eventType }, pathKey) => { 
         try {
             off(fRef, eventType as any, callback); 
-            addDebugLog(`Detached listener for ${fRef.toString()} type ${eventType}`);
+            addDebugLog(`Detached listener for ${pathKey}`);
         } catch(e: any) {
-            addDebugLog(`Error detaching listener for ${fRef.toString()} type ${eventType}: ${e.message}`);
+            addDebugLog(`Error detaching listener for ${pathKey}: ${e.message}`);
         }
     });
     firebaseListeners.current.clear();
+    addDebugLog("All Firebase listeners cleared.");
 
     if (roomId && sessionUser?.id) {
-      remove(ref(db, `conferenceRooms/${roomId}/participants/${sessionUser.id}`)).catch(e => addDebugLog(`Error removing self from participants: ${e.message}`));
-      remove(ref(db, `conferenceRooms/${roomId}/signals/${sessionUser.id}`)).catch(e => addDebugLog(`Error removing my signals folder: ${e.message}`));
-      addDebugLog(`Removed self from participants and signals for room ${roomId}.`);
+      try {
+        await remove(ref(db, `conferenceRooms/${roomId}/participants/${sessionUser.id}`));
+        addDebugLog(`Removed self from participants: conferenceRooms/${roomId}/participants/${sessionUser.id}`);
+      } catch(e:any) {
+        addDebugLog(`Error removing self from participants: ${e.message}`);
+      }
+      try {
+        await remove(ref(db, `conferenceRooms/${roomId}/signals/${sessionUser.id}`));
+        addDebugLog(`Removed my signals folder: conferenceRooms/${roomId}/signals/${sessionUser.id}`);
+      } catch(e:any) {
+        addDebugLog(`Error removing my signals folder: ${e.message}`);
+      }
     }
     
     setParticipants([]); 
     participantsRef.current = []; 
     setConferenceChatMessages([]);
     setIsChatPanelOpen(false);
+    addDebugLog("Local participants, chat messages, and chat panel state reset.");
     
-    setTimeout(() => {
+    setTimeout(() => { // Defer toast
         toast({ title: "Left Room", description: "You have left the conference room." });
     }, 0);
-    router.push('/');
-  }, [roomId, sessionUser, localStream, cleanupPeerConnection, addDebugLog, toast, router, setParticipants]);
+
+    if (router) router.push('/');
+  }, [roomId, sessionUser, addDebugLog, toast, router, setParticipants]); // Dependencies for useCallback
+
+
+  useEffect(() => {
+    // This effect runs once on mount and its cleanup runs on unmount
+    const cleanupFunction = async () => {
+        addDebugLog("RoomPage is unmounting. Calling handleLeaveRoom.");
+        // await handleLeaveRoom(); // Directly call the stable version
+    };
+    
+    // The actual call to handleLeaveRoom is now deferred to a ref to ensure the latest version is called.
+    // This setup primarily focuses on registering the unmount.
+    // The handleLeaveRoomRef pattern below is better for calling the latest version from cleanup.
+
+    return () => {
+      // This will be called when the component unmounts
+      // Ensure handleLeaveRoomRef.current is called
+    };
+  }, []); // Empty dependency array for mount/unmount behavior
+
+  const handleLeaveRoomRef = useRef(handleLeaveRoom);
+  useEffect(() => {
+    handleLeaveRoomRef.current = handleLeaveRoom;
+  }, [handleLeaveRoom]);
+
+  useEffect(() => {
+    // This is the primary unmount effect.
+    // It uses a ref to `handleLeaveRoom` to ensure it calls the latest version
+    // of the function, with the latest state captured by its `useCallback` closure.
+    return () => {
+      addDebugLog("RoomPage unmounting (via ref effect). Calling latest handleLeaveRoom.");
+      handleLeaveRoomRef.current();
+    };
+  }, []); // Empty dependency array: runs only on unmount.
+
 
   const initializeAndSendOffer = useCallback(async (peerId: string, peerName?: string) => {
-    if (!localStream || !roomId || !sessionUser?.id || peerConnectionsRef.current.has(peerId)) {
-      addDebugLog(`Cannot send offer to ${peerId}. Conditions not met. LocalStream: ${!!localStream}, RoomId: ${!!roomId}, SessionUser: ${!!sessionUser?.id}, PC Exists: ${peerConnectionsRef.current.has(peerId)}`);
+    if (!localStreamRef.current || !roomId || !sessionUser?.id || peerConnectionsRef.current.has(peerId)) {
+      addDebugLog(`Cannot send offer to ${peerId}. Conditions not met. LocalStream: ${!!localStreamRef.current}, RoomId: ${!!roomId}, SessionUser: ${!!sessionUser?.id}, PC Exists: ${peerConnectionsRef.current.has(peerId)}`);
       return;
     }
     addDebugLog(`Initializing PC and sending offer to ${peerId} (${peerName || 'Unknown'})`);
     const pc = new RTCPeerConnection(servers);
     peerConnectionsRef.current.set(peerId, pc);
     earlyCandidatesRef.current.set(peerId, []); 
-    localStream.getTracks().forEach(track => { try { pc.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} for peer ${peerId}`); } catch (e: any) { addDebugLog(`Error adding local track for ${peerId}: ${e.message}`); }});
+    localStreamRef.current.getTracks().forEach(track => { try { pc.addTrack(track, localStreamRef.current!); addDebugLog(`Added local track ${track.kind} for peer ${peerId}`); } catch (e: any) { addDebugLog(`Error adding local track for ${peerId}: ${e.message}`); }});
     
     pc.onicecandidate = event => {
       if (event.candidate && roomId && sessionUser?.id) {
@@ -318,7 +393,7 @@ export default function RoomPage() {
           addDebugLog(`Caller: Created new stream and added track ${event.track.kind} (${event.track.id}) for ${currentPeerId}. Stream now has ${streamToUpdate.getTracks().length} tracks.`);
         }
         const participantInfo = participantsRef.current.find(p => p.id === currentPeerId);
-        newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined });
+        newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined }); // Create new userInfo object
         return newMap;
       });
     };
@@ -337,7 +412,7 @@ export default function RoomPage() {
       const offerPayload: RoomSignal = { type: 'offer', senderId: sessionUser.id, senderName: sessionUser.name, data: pc.localDescription!.toJSON() };
       await set(push(ref(db, `conferenceRooms/${roomId}/signals/${peerId}`)), offerPayload); addDebugLog(`Offer sent to ${peerId}`);
     } catch (error: any) { addDebugLog(`Error creating/sending offer to ${peerId}: ${error.message}`); cleanupPeerConnection(peerId); }
-  }, [localStream, roomId, sessionUser, addDebugLog, cleanupPeerConnection]);
+  }, [roomId, sessionUser, addDebugLog, cleanupPeerConnection]);
 
   useEffect(() => {
     if (!isInRoom || !roomId || !sessionUser?.id || !localStream) { addDebugLog(`Main useEffect skipped. isInRoom: ${isInRoom}, roomId: ${!!roomId}, sessionUser: ${!!sessionUser?.id}, localStream: ${!!localStream}`); return; }
@@ -387,7 +462,7 @@ export default function RoomPage() {
                     addDebugLog(`Callee: Created new stream and added track ${event.track.kind} (${event.track.id}) for ${currentPeerId}. Stream now has ${streamToUpdate.getTracks().length} tracks.`);
                 }
                 const participantInfo = participantsRef.current.find(p => p.id === currentPeerId);
-                newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined });
+                newMap.set(currentPeerId, { stream: streamToUpdate, userInfo: participantInfo ? {...participantInfo} : undefined }); // Create new userInfo object
                 return newMap;
             });
           };
@@ -409,7 +484,7 @@ export default function RoomPage() {
               queuedCandidates.forEach(candidate => {
                 pc!.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => addDebugLog(`Error adding early ICE for ${senderId}: ${e.message || e}`));
               });
-              earlyCandidatesRef.current.delete(senderId);
+              earlyCandidatesRef.current.delete(senderId); // Clear processed candidates
               return pc!.createAnswer(); 
             })
             .then(answer => { addDebugLog(`Answer created for ${senderId}.`); return pc!.setLocalDescription(answer); })
@@ -426,7 +501,7 @@ export default function RoomPage() {
               queuedCandidates.forEach(candidate => {
                 pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => addDebugLog(`Error adding early ICE for ${senderId}: ${e.message || e}`));
               });
-              earlyCandidatesRef.current.delete(senderId);
+              earlyCandidatesRef.current.delete(senderId); // Clear processed candidates
             })
             .catch(e => addDebugLog(`Error setting remote desc (answer) from ${senderId}: ${e.message || e}. PC state: ${pc.signalingState}`));
 
@@ -458,7 +533,7 @@ export default function RoomPage() {
       addDebugLog(`Participants updated (from DB): ${newParticipantsListFromDb.map(p => `${p.name}(${p.id.substring(0,4)})`).join(', ')} (${newParticipantsListFromDb.length} total)`);
       
       const currentSUserId = sessionUser?.id; 
-      if (currentSUserId && localStream) {
+      if (currentSUserId && localStreamRef.current) { // Use localStreamRef here
         newParticipantsListFromDb.forEach(p => { 
           if (p.id !== currentSUserId && !peerConnectionsRef.current.has(p.id)) { 
             addDebugLog(`New participant ${p.name} (${p.id}) detected via DB. Initializing connection.`); 
@@ -502,10 +577,10 @@ export default function RoomPage() {
     }
     addDebugLog(`Attempting to join room ${roomId} as ${sessionUser.name} (${sessionUser.id})`);
     
-    let stream: MediaStream | null = null;
+    let streamAcquired: MediaStream | null = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream); 
+      streamAcquired = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      setLocalStream(streamAcquired); 
       setIsMicOn(true); 
       setIsVideoOn(true); 
       addDebugLog("Local media stream acquired.");
@@ -516,7 +591,7 @@ export default function RoomPage() {
       return; 
     }
 
-    if (stream) { 
+    if (streamAcquired) { 
         try {
             const participantRefPath = `conferenceRooms/${roomId}/participants/${sessionUser.id}`;
             const participantDbRef = ref(db, participantRefPath);
@@ -546,7 +621,7 @@ export default function RoomPage() {
         } catch (dbError: any) {
             addDebugLog(`Error setting Firebase participant data: ${dbError.message}`);
             toast({ title: "Room Join Error", description: `Could not update room participation: ${dbError.message}`, variant: "destructive" });
-            stream.getTracks().forEach(track => track.stop());
+            streamAcquired.getTracks().forEach(track => track.stop());
             setLocalStream(null);
             setIsInRoom(false); 
         }
@@ -603,22 +678,28 @@ export default function RoomPage() {
     
     useEffect(() => { 
       let videoElement = videoRef.current;
+      addDebugLogProp(`VideoFeed effect for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): Stream ID: ${stream?.id}, isVideoActuallyOn: ${isVideoActuallyOn}. Current srcObject ID: ${videoElement?.srcObject instanceof MediaStream ? videoElement.srcObject.id : 'null or not stream'}`);
+      
       if (videoElement && stream) { 
-        videoElement.srcObject = stream; 
-        addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject set. Stream ID: ${stream.id}, Tracks: ${stream.getTracks().length} (v: ${stream.getVideoTracks().length}, a: ${stream.getAudioTracks().length}). Video on: ${isVideoActuallyOn}`);
+        if (videoElement.srcObject !== stream) {
+          videoElement.srcObject = stream; 
+          addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject SET. New Stream ID: ${stream.id}, Tracks: ${stream.getTracks().length} (v: ${stream.getVideoTracks().length}, a: ${stream.getAudioTracks().length}). Video on: ${isVideoActuallyOn}`);
+        }
       } else {
-        addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): stream is ${stream === null ? 'null' : 'defined but falsy'}. Video on: ${isVideoActuallyOn}`);
-        if (videoElement) {
+        if (videoElement && videoElement.srcObject !== null) {
             videoElement.srcObject = null; 
+            addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject NULLED (stream is falsy or null).`);
         }
       }
       return () => {
-        if (videoElement) {
+        if (videoElement && videoElement.srcObject !== null) { // Ensure it's nulled on unmount only if it was set
             videoElement.srcObject = null;
-            addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject nulled on cleanup.`);
+            addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): srcObject NULLED on cleanup. Stream ID was: ${stream?.id}`);
+        } else {
+            addDebugLogProp(`VideoFeed for ${user?.name || (isLocal ? 'local' : 'remote')}(${user?.id?.substring(0,4)}): Cleanup called, srcObject was already null or videoElement not present. Stream ID was: ${stream?.id}`);
         }
       };
-    }, [stream, user, isLocal, isVideoActuallyOn, addDebugLogProp, internalStreamKey]); 
+    }, [stream, user, isLocal, isVideoActuallyOn, addDebugLogProp]); 
 
     useEffect(() => {
         const currentStream = stream;
