@@ -9,7 +9,7 @@ import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
 import { useAuth } from '@/hooks/use-auth';
 import { db } from '@/lib/firebase';
 import { ref, set, onValue, off, remove, serverTimestamp, type DatabaseReference, push, child, query, limitToLast, orderByKey, type Query as FirebaseQuery } from 'firebase/database';
-import type { OnlineUser, UserProfile, RoomSignal, ChatMessage } from '@/types';
+import type { OnlineUser, UserProfile, RoomSignal, ChatMessage, RTCIceCandidateJSON } from '@/types';
 import { Video as VideoIcon, Mic, MicOff, VideoOff as VideoOffIcon, PhoneOff, Users as UsersIcon, LogOut, Copy, AlertTriangle, MessageSquare } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -42,6 +42,7 @@ export default function RoomPage() {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStreams, setRemoteStreams] = useState<Map<string, RemoteStreamEntry>>(new Map());
   const peerConnectionsRef = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const earlyCandidatesRef = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   
   const [_participants, _setParticipantsInternal] = useState<OnlineUser[]>([]);
   const participantsRef = useRef<OnlineUser[]>([]); 
@@ -228,6 +229,7 @@ export default function RoomPage() {
       peerConnectionsRef.current.delete(peerId);
     }
     setRemoteStreams(prev => { const newStreams = new Map(prev); newStreams.delete(peerId); return newStreams; });
+    earlyCandidatesRef.current.delete(peerId);
     addDebugLog(`Peer connection for ${peerId} fully cleaned from refs and state.`);
   }, [addDebugLog]);
 
@@ -244,6 +246,7 @@ export default function RoomPage() {
     }
     peerConnectionsRef.current.forEach((_, peerId) => { addDebugLog(`Cleaning up PC for ${peerId} during leave room.`); cleanupPeerConnection(peerId); });
     peerConnectionsRef.current.clear();
+    earlyCandidatesRef.current.clear();
     setRemoteStreams(new Map());
     addDebugLog("All peer connections cleaned up.");
     
@@ -282,6 +285,7 @@ export default function RoomPage() {
     addDebugLog(`Initializing PC and sending offer to ${peerId} (${peerName || 'Unknown'})`);
     const pc = new RTCPeerConnection(servers);
     peerConnectionsRef.current.set(peerId, pc);
+    earlyCandidatesRef.current.set(peerId, []); // Initialize queue for this peer
     localStream.getTracks().forEach(track => { try { pc.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} for peer ${peerId}`); } catch (e: any) { addDebugLog(`Error adding local track for ${peerId}: ${e.message}`); }});
     
     pc.onicecandidate = event => {
@@ -322,11 +326,9 @@ export default function RoomPage() {
     pc.oniceconnectionstatechange = () => { 
       const iceState = pc.iceConnectionState;
       addDebugLog(`ICE state for ${peerId}: ${iceState}`); 
-      if (iceState === 'failed' || iceState === 'closed') { 
+      if (iceState === 'failed' || iceState === 'closed' || iceState === 'disconnected') { 
         addDebugLog(`ICE connection to ${peerId} ${iceState}. Cleaning up.`); 
         cleanupPeerConnection(peerId); 
-      } else if (iceState === 'disconnected') {
-        addDebugLog(`ICE connection to ${peerId} is disconnected. Monitoring for potential recovery.`);
       }
     };
     pc.onsignalingstatechange = () => addDebugLog(`Signaling state for ${peerId}: ${pc.signalingState}`);
@@ -349,9 +351,10 @@ export default function RoomPage() {
         if (!senderId || senderId === sessionUser.id || !signalKey) return; 
         addDebugLog(`Received signal type '${type}' from ${senderId} (${senderName || 'Unknown'})`);
         let pc = peerConnectionsRef.current.get(senderId);
+
         if (type === 'offer') {
           if (pc && pc.signalingState !== 'closed') { addDebugLog(`WARN: Received offer from ${senderId}, but PC already exists and is not closed. State: ${pc.signalingState}. Cleaning up old one.`); cleanupPeerConnection(senderId); }
-          pc = new RTCPeerConnection(servers); peerConnectionsRef.current.set(senderId, pc); addDebugLog(`Created new PC for offer from ${senderId}`);
+          pc = new RTCPeerConnection(servers); peerConnectionsRef.current.set(senderId, pc); earlyCandidatesRef.current.set(senderId, []); addDebugLog(`Created new PC for offer from ${senderId}`);
           localStream.getTracks().forEach(track => { try { pc!.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} to PC for ${senderId} (on offer)`);} catch (e:any) { addDebugLog(`Error adding local track on offer from ${senderId}: ${e.message}`); }});
           
           pc.onicecandidate = event => { 
@@ -392,24 +395,51 @@ export default function RoomPage() {
           pc.oniceconnectionstatechange = () => { 
             const iceState = pc!.iceConnectionState;
             addDebugLog(`ICE state for ${senderId} (on offer path): ${iceState}`); 
-            if (iceState === 'failed' || iceState === 'closed') { 
+            if (iceState === 'failed' || iceState === 'closed' || iceState === 'disconnected') { 
               addDebugLog(`ICE connection to ${senderId} ${iceState} (on offer path). Cleaning up.`); cleanupPeerConnection(senderId); 
-            } else if (iceState === 'disconnected') {
-              addDebugLog(`ICE connection to ${senderId} (on offer path) is disconnected. Monitoring for potential recovery.`);
             }
           };
           pc.onsignalingstatechange = () => addDebugLog(`Signaling state for ${senderId} (on offer path): ${pc!.signalingState}`);
+          
           pc!.setRemoteDescription(new RTCSessionDescription(data as RTCSessionDescriptionInit))
-            .then(() => { addDebugLog(`Remote desc (offer) from ${senderId} set.`); return pc!.createAnswer(); })
+            .then(() => { 
+              addDebugLog(`Remote desc (offer) from ${senderId} set.`);
+              const queuedCandidates = earlyCandidatesRef.current.get(senderId) || [];
+              addDebugLog(`Processing ${queuedCandidates.length} early ICE candidates for ${senderId} after setting offer.`);
+              queuedCandidates.forEach(candidate => {
+                pc!.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => addDebugLog(`Error adding early ICE for ${senderId}: ${e.message || e}`));
+              });
+              earlyCandidatesRef.current.delete(senderId);
+              return pc!.createAnswer(); 
+            })
             .then(answer => { addDebugLog(`Answer created for ${senderId}.`); return pc!.setLocalDescription(answer); })
             .then(() => { addDebugLog(`Local desc (answer) for ${senderId} set.`); const answerPayload: RoomSignal = { type: 'answer', senderId: sessionUser.id!, senderName: sessionUser.name, data: pc!.localDescription!.toJSON() }; return set(push(ref(db, `conferenceRooms/${roomId}/signals/${senderId}`)), answerPayload); })
             .then(() => addDebugLog(`Answer sent to ${senderId}`))
             .catch(e => { addDebugLog(`Error processing offer / sending answer to ${senderId}: ${e.message || e}`); cleanupPeerConnection(senderId); });
+
         } else if (type === 'answer' && pc && pc.signalingState !== 'closed') {
-          pc.setRemoteDescription(new RTCSessionDescription(data as RTCSessionDescriptionInit)).then(() => addDebugLog(`Remote description (answer) set from ${senderId}`)).catch(e => addDebugLog(`Error setting remote desc (answer) from ${senderId}: ${e.message || e}. PC state: ${pc.signalingState}`));
+          pc.setRemoteDescription(new RTCSessionDescription(data as RTCSessionDescriptionInit))
+            .then(() => {
+              addDebugLog(`Remote description (answer) set from ${senderId}`);
+              const queuedCandidates = earlyCandidatesRef.current.get(senderId) || [];
+              addDebugLog(`Processing ${queuedCandidates.length} early ICE candidates for ${senderId} after setting answer.`);
+              queuedCandidates.forEach(candidate => {
+                pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => addDebugLog(`Error adding early ICE for ${senderId}: ${e.message || e}`));
+              });
+              earlyCandidatesRef.current.delete(senderId);
+            })
+            .catch(e => addDebugLog(`Error setting remote desc (answer) from ${senderId}: ${e.message || e}. PC state: ${pc.signalingState}`));
+
         } else if (type === 'candidate' && pc && pc.signalingState !== 'closed') {
-           if (pc.remoteDescription) { pc.addIceCandidate(new RTCIceCandidate(data as RTCIceCandidateInit)).then(() => addDebugLog(`Added ICE candidate from ${senderId}`)).catch(e => addDebugLog(`Error adding ICE candidate from ${senderId}: ${e.message || e}. PC state: ${pc.signalingState}`)); } 
-           else { addDebugLog(`WARN: Received ICE candidate from ${senderId} but remote description not yet set. Candidate might be queued or dropped by browser.`); }
+           const candidateInit = data as RTCIceCandidateInit;
+           if (pc.remoteDescription) { 
+             pc.addIceCandidate(new RTCIceCandidate(candidateInit)).then(() => addDebugLog(`Added ICE candidate from ${senderId}`)).catch(e => addDebugLog(`Error adding ICE candidate from ${senderId}: ${e.message || e}. PC state: ${pc.signalingState}`)); 
+           } else { 
+             addDebugLog(`WARN: Received ICE candidate from ${senderId} but remote description not yet set. Queuing candidate.`);
+             const queue = earlyCandidatesRef.current.get(senderId) || [];
+             queue.push(candidateInit);
+             earlyCandidatesRef.current.set(senderId, queue);
+           }
         } else if (pc && pc.signalingState === 'closed' && (type === 'answer' || type === 'candidate')){ addDebugLog(`Received ${type} from ${senderId} but PC is already closed. Ignoring.`); }
         remove(child(mySignalsDbRef, signalKey)).catch(e => addDebugLog(`Failed to remove processed signal ${signalKey}: ${e.message}`));
       });
@@ -438,8 +468,8 @@ export default function RoomPage() {
       }
 
       peerConnectionsRef.current.forEach((_, pcPeerId) => { 
-        if (!newParticipantsListFromDb.find(p => p.id === pcPeerId)) { 
-          addDebugLog(`Participant ${pcPeerId} no longer in DB list. Cleaning up their connection.`); 
+        if (!newParticipantsListFromDb.find(p => p.id === pcPeerId) && pcPeerId !== currentSUserId ) { 
+          addDebugLog(`Participant ${pcPeerId} no longer in DB list and is not self. Cleaning up their connection.`); 
           cleanupPeerConnection(pcPeerId); 
         }
       });
@@ -483,11 +513,10 @@ export default function RoomPage() {
       addDebugLog(`Error getting media: ${err.message}`);
       toast({ title: "Media Access Error", description: `Could not access camera/microphone: ${err.message}. Please check permissions.`, variant: "destructive" });
       setLocalStream(null); 
-      // No need to set isInRoom false here, as it hasn't been set true yet.
       return; 
     }
 
-    if (stream) { // This check ensures stream is not null before proceeding
+    if (stream) { 
         try {
             const participantRefPath = `conferenceRooms/${roomId}/participants/${sessionUser.id}`;
             const participantDbRef = ref(db, participantRefPath);
@@ -519,11 +548,10 @@ export default function RoomPage() {
             toast({ title: "Room Join Error", description: `Could not update room participation: ${dbError.message}`, variant: "destructive" });
             stream.getTracks().forEach(track => track.stop());
             setLocalStream(null);
-            setIsInRoom(false); // Explicitly set false on DB error
+            setIsInRoom(false); 
         }
     } else {
         addDebugLog("handleJoinRoom: Media stream was not acquired, join process aborted before Firebase operations.");
-        // Toast for media error already shown above
     }
   };
 
@@ -640,7 +668,8 @@ export default function RoomPage() {
                 <p className="text-xs text-gray-400">
                     {isLocal && !stream ? "Camera not available" : 
                      (isLocal && !isVideoActuallyOn ? "Your video is off" : 
-                      (!isLocal && stream && !isVideoActuallyOn ? "Video off" : "No stream"))}
+                      (!isLocal && stream && !isVideoActuallyOn ? "Video off" : 
+                       (!isLocal && !stream ? "No stream from user" : "Waiting for video...") ))}
                 </p>
             </div>
         )}
@@ -754,5 +783,6 @@ export default function RoomPage() {
     </MainLayout>
   );
 }
+    
 
     
