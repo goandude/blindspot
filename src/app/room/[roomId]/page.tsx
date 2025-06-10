@@ -10,7 +10,7 @@ import { useAuth } from '@/hooks/use-auth';
 import { db } from '@/lib/firebase';
 import { ref, set, onValue, off, remove, serverTimestamp, type DatabaseReference, push, child, query, limitToLast, orderByKey, type Query as FirebaseQuery } from 'firebase/database';
 import type { OnlineUser, UserProfile, RoomSignal, ChatMessage, RTCIceCandidateJSON } from '@/types';
-import { Video as VideoIcon, Mic, MicOff, VideoOff as VideoOffIcon, PhoneOff, Users as UsersIcon, LogOut, Copy, AlertTriangle, MessageSquare } from 'lucide-react';
+import { Video as VideoIcon, Mic, MicOff, VideoOff as VideoOffIcon, PhoneOff, Users as UsersIcon, Copy, AlertTriangle, MessageSquare, Home } from 'lucide-react'; // Added Home
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ChatPanel } from '@/components/features/chat/chat-panel';
@@ -285,7 +285,7 @@ export default function RoomPage() {
     addDebugLog(`Initializing PC and sending offer to ${peerId} (${peerName || 'Unknown'})`);
     const pc = new RTCPeerConnection(servers);
     peerConnectionsRef.current.set(peerId, pc);
-    earlyCandidatesRef.current.set(peerId, []); // Initialize queue for this peer
+    earlyCandidatesRef.current.set(peerId, []); 
     localStream.getTracks().forEach(track => { try { pc.addTrack(track, localStream); addDebugLog(`Added local track ${track.kind} for peer ${peerId}`); } catch (e: any) { addDebugLog(`Error adding local track for ${peerId}: ${e.message}`); }});
     
     pc.onicecandidate = event => {
@@ -690,7 +690,6 @@ export default function RoomPage() {
   return (
     <MainLayout fullscreen>
       <div className="flex h-screen bg-black text-white">
-        {/* Main content area for video grid and controls */}
         <div className="relative flex-grow flex flex-col overflow-hidden"> 
             <div 
               className="flex-grow p-1 sm:p-2 md:p-4 grid gap-1 sm:gap-2 md:gap-4 items-start justify-center overflow-auto"
@@ -714,9 +713,12 @@ export default function RoomPage() {
             </div>
             {isInRoom && (
               <div className="absolute bottom-0 left-0 right-0 p-2 sm:p-3 bg-black/70 flex justify-between items-center z-20 shadow-lg"> 
-                <div className="text-xs sm:text-sm text-gray-300 hidden md:block">
-                  Room: {roomId?.substring(0,6)}... ({_participants.length})
-                </div>
+                 <Button onClick={handleLeaveRoom} variant="ghost" size="icon" className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12 md:hidden">
+                    <Home className="h-5 w-5 sm:h-6 sm:w-6" />
+                 </Button>
+                 <Button onClick={handleLeaveRoom} variant="outline" className="text-white border-white/50 hover:bg-white/20 hidden md:flex items-center gap-2">
+                    <Home className="h-4 w-4"/> Go Home
+                 </Button>
                 <div className="flex-grow flex justify-center gap-2 sm:gap-3">
                   <Button variant="ghost" size="icon" onClick={toggleMic} disabled={!localStream} className="text-white hover:bg-white/20 active:bg-white/30 rounded-full w-10 h-10 sm:w-12 sm:h-12">
                     {isMicOn ? <Mic className="h-5 w-5 sm:h-6 sm:w-6" /> : <MicOff className="h-5 w-5 sm:h-6 sm:w-6 text-red-400" />}
@@ -742,11 +744,11 @@ export default function RoomPage() {
                     <Copy className="mr-1 sm:mr-2 h-3 w-3 sm:h-4 sm:w-4" /> Copy Link
                   </Button>
                 </div>
+                 <div className="w-10 h-10 sm:w-12 sm:h-12 md:hidden" /> {/* Spacer for mobile right side */}
               </div>
             )}
         </div>
 
-        {/* Chat Panel Sidebar */}
         {isInRoom && (
           <div className={cn(
             "h-full bg-gray-900/90 backdrop-blur-sm shadow-2xl transition-all duration-300 ease-in-out z-30 flex-shrink-0", 
@@ -783,6 +785,4 @@ export default function RoomPage() {
     </MainLayout>
   );
 }
-    
-
     

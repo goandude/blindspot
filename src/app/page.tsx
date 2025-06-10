@@ -7,10 +7,10 @@ import { VideoChatPlaceholder } from '@/components/features/chat/video-chat-plac
 import { ReportDialog } from '@/components/features/reporting/report-dialog';
 import { ProfileSetupDialog } from '@/components/features/profile/profile-setup-dialog';
 import { MainLayout } from '@/components/layout/main-layout';
-import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile, ChatMessage, RoomSignal } from '@/types'; // Added ChatMessage, RoomSignal
-import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff, Link2, Users as UsersIcon, MessageSquare } from 'lucide-react'; // Added MessageSquare
-import { db } from '@/lib/firebase'; // storage might be needed later
-import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get, query, limitToLast, orderByKey, type Query as FirebaseQuery } from 'firebase/database'; // Removed 'on'
+import type { OnlineUser, IncomingCallOffer, CallAnswer, UserProfile, ChatMessage, RoomSignal } from '@/types';
+import { PhoneOff, Video as VideoIcon, Shuffle, LogIn, LogOut, Edit3, Wifi, WifiOff, Link2, Users as UsersIcon, MessageSquare, ArrowLeft } from 'lucide-react';
+import { db } from '@/lib/firebase';
+import { ref, set, onValue, off, remove, push, child, serverTimestamp, type DatabaseReference, get, query, limitToLast, orderByKey, type Query as FirebaseQuery } from 'firebase/database';
 import { useToast } from '@/hooks/use-toast';
 import { Skeleton } from '@/components/ui/skeleton';
 import { OnlineUsersPanel } from '@/components/features/online-users/online-users-panel';
@@ -21,7 +21,8 @@ import { useAuth } from '@/hooks/use-auth';
 import { IncomingCallDialog } from '@/components/features/call/incoming-call-dialog';
 import { useRouter } from 'next/navigation';
 import { Input } from '@/components/ui/input';
-import { ChatPanel } from '@/components/features/chat/chat-panel'; // Import ChatPanel
+import { ChatPanel } from '@/components/features/chat/chat-panel';
+import { ChatContactList } from '@/components/features/chat/chat-contact-list'; // New import
 import { cn } from '@/lib/utils';
 
 
@@ -36,7 +37,6 @@ const servers = {
 
 const generateAnonymousSessionId = () => Math.random().toString(36).substring(2, 10);
 
-// Helper function to create a consistent direct chat ID
 const getDirectChatId = (userId1: string, userId2: string): string => {
   return [userId1, userId2].sort().join('_');
 };
@@ -52,7 +52,7 @@ export default function HomePage() {
   const [isMicOn, setIsMicOn] = useState(true);
   const [isVideoOn, setIsVideoOn] = useState(true);
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
-  const [peerInfo, setPeerInfo] = useState<OnlineUser | UserProfile | null>(null);
+  const [peerInfo, setPeerInfo] = useState<OnlineUser | UserProfile | null>(null); // For call context AND selected chat peer
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
   const [pageLoading, setPageLoading] = useState(true);
   const [isProfileEditDialogOpen, setIsProfileEditDialogOpen] = useState(false);
@@ -61,10 +61,13 @@ export default function HomePage() {
   const [createdRoomId, setCreatedRoomId] = useState<string | null>(null);
   const [roomLink, setRoomLink] = useState<string | null>(null);
 
-  // States for 1-to-1 chat
+  // States for dual-panel chat
+  const [activeChatPeers, setActiveChatPeers] = useState<OnlineUser[]>([]);
+  const [selectedChatPeer, setSelectedChatPeer] = useState<OnlineUser | null>(null);
+  const [isChatUIVisible, setIsChatUIVisible] = useState(false); // Controls the main dual-panel chat UI
   const [directChatMessages, setDirectChatMessages] = useState<ChatMessage[]>([]);
   const [currentDirectChatId, setCurrentDirectChatId] = useState<string | null>(null);
-  const [isDirectChatPanelOpen, setIsDirectChatPanelOpen] = useState(false);
+  const [isInCallChatOpen, setIsInCallChatOpen] = useState(false); // For chat panel during active call
 
 
   const { toast } = useToast();
@@ -81,8 +84,8 @@ export default function HomePage() {
   } = useAuth();
 
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  const roomIdRef = useRef<string | null>(null); // For 1-to-1 calls
-  const peerIdRef = useRef<string | null>(null);
+  const roomIdRef = useRef<string | null>(null);
+  const peerIdRef = useRef<string | null>(null); // Tracks the peer in an active *call*
   const isCallerRef = useRef<boolean>(false);
   const ringingAudioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -108,7 +111,6 @@ export default function HomePage() {
     chatStateRef.current = chatState;
   }, [chatState]);
 
-  // Effect to manage session user based on auth state
  useEffect(() => {
     addDebugLog(`Auth state update: authLoading=${authLoading}, authProfileLoading=${authProfileLoading}, authCurrentUser=${authCurrentUser?.uid}, isProfileSetupNeeded=${isProfileSetupNeeded}, current anonIdState=${anonymousSessionId}`);
 
@@ -215,9 +217,7 @@ export default function HomePage() {
       console.warn("removeFirebaseListener: Invalid dbQueryOrRef passed (cannot call toString)", {dbQueryOrRef});
       return;
     }
-  
     const pathKey = dbQueryOrRef.toString() + '::' + eventType;
-    
     const listenerEntry = firebaseListeners.current.get(pathKey);
     if (listenerEntry) {
         off(listenerEntry.ref, listenerEntry.eventType as any, listenerEntry.callback);
@@ -233,14 +233,12 @@ export default function HomePage() {
     listenerFunc: (snapshot: any) => void,
     eventType: 'value' | 'child_added' | 'child_changed' | 'child_removed' = 'value'
   ) => {
-    if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function') {
+     if (!dbQueryOrRef || typeof dbQueryOrRef.toString !== 'function') {
       addDebugLog(`WARN: addFirebaseListener called with invalid dbQueryOrRef (cannot call toString).`);
       console.warn("addFirebaseListener: Invalid dbQueryOrRef passed (cannot call toString)", { dbQueryOrRef });
       return;
     }
-
     const pathKey = dbQueryOrRef.toString() + '::' + eventType;
-
     if (firebaseListeners.current.has(pathKey)) {
       addDebugLog(`Listener for pathKey ${pathKey} already exists. Removing old one first.`);
       const oldEntry = firebaseListeners.current.get(pathKey);
@@ -250,14 +248,12 @@ export default function HomePage() {
         addDebugLog(`Successfully removed old Firebase listener internally for pathKey: ${pathKey}`);
       }
     }
-    
     const actualCallback = (snapshot: any) => listenerFunc(snapshot);
     const errorHandler = (error: Error) => {
         const refPathForError = dbQueryOrRef.toString();
         addDebugLog(`ERROR reading from ${refPathForError} (event: ${eventType}): ${error.message}`);
         toast({ title: "Firebase Error", description: `Failed to listen to ${refPathForError} (event: ${eventType}). Check console.`, variant: "destructive" });
     };
-    
     if (eventType === 'value') {
       onValue(dbQueryOrRef, actualCallback, errorHandler);
     } else {
@@ -265,7 +261,6 @@ export default function HomePage() {
       console.error(`Unsupported eventType: ${eventType} in addFirebaseListener`);
       return;
     }
-  
     firebaseListeners.current.set(pathKey, { ref: dbQueryOrRef, callback: actualCallback, eventType });
     addDebugLog(`Added Firebase listener for pathKey: ${pathKey}`);
   }, [addDebugLog, toast]);
@@ -294,8 +289,6 @@ export default function HomePage() {
       peerConnectionRef.current.getSenders().forEach(sender => {
         if (sender.track) {
           addDebugLog(`Stopping sender track: ${sender.track.kind}`);
-          // Do NOT stop sender.track() here, as localStream is managed globally for 1-to-1
-          // sender.track.stop(); 
         }
       });
       if (peerConnectionRef.current.signalingState !== 'closed') {
@@ -316,13 +309,13 @@ export default function HomePage() {
   const cleanupCallData = useCallback(async () => {
     const myId = currentSessionUserIdRef.current;
     const currentRoomId = roomIdRef.current;
-    const currentPeerId = peerIdRef.current;
-    addDebugLog(`Cleaning up call data. MyID: ${myId}, Room: ${currentRoomId}, Peer: ${currentPeerId}`);
+    const currentCallPeerId = peerIdRef.current; // Use a different name to avoid confusion with chat peer
+    addDebugLog(`Cleaning up call data. MyID: ${myId}, Room: ${currentRoomId}, CallPeer: ${currentCallPeerId}`);
     if (currentRoomId) {
       const roomSignalsPath = `callSignals/${currentRoomId}`;
       remove(ref(db, roomSignalsPath)).catch(e => addDebugLog(`WARN: Error removing room signals for ${roomSignalsPath}: ${e.message || e}`));
       if (myId) remove(ref(db, `iceCandidates/${currentRoomId}/${myId}`)).catch(e => addDebugLog(`WARN: Error removing my ICE for room ${currentRoomId}/${myId}: ${e.message || e}`));
-      if (currentPeerId) remove(ref(db, `iceCandidates/${currentRoomId}/${currentPeerId}`)).catch(e => addDebugLog(`WARN: Error removing peer ICE for room ${currentRoomId}/${currentPeerId}: ${e.message || e}`));
+      if (currentCallPeerId) remove(ref(db, `iceCandidates/${currentRoomId}/${currentCallPeerId}`)).catch(e => addDebugLog(`WARN: Error removing peer ICE for room ${currentRoomId}/${currentCallPeerId}: ${e.message || e}`));
     }
     if (myId) {
       remove(ref(db, `callSignals/${myId}/pendingOffer`)).catch(e => addDebugLog(`WARN: Error removing my pending offer from callSignals/${myId}/pendingOffer: ${e.message || e}`));
@@ -332,9 +325,9 @@ export default function HomePage() {
 
   const handleEndCall = useCallback(async (showReveal = true) => {
     const myCurrentId = currentSessionUserIdRef.current;
-    const currentPeerIdVal = peerIdRef.current;
+    const currentCallPeerId = peerIdRef.current;
     const currentRoomIdVal = roomIdRef.current;
-    addDebugLog(`Handling end call. MyID: ${myCurrentId}, PeerID: ${currentPeerIdVal}, RoomID: ${currentRoomIdVal}. Show reveal: ${showReveal}. Current chat state: ${chatStateRef.current}.`);
+    addDebugLog(`Handling end call. MyID: ${myCurrentId}, CallPeerID: ${currentCallPeerId}, RoomID: ${currentRoomIdVal}. Show reveal: ${showReveal}. Current chat state: ${chatStateRef.current}.`);
     const wasConnected = ['connected', 'connecting', 'dialing'].includes(chatStateRef.current);
 
     stopRingingSound();
@@ -343,62 +336,60 @@ export default function HomePage() {
     cleanupWebRTC();
     if (currentRoomIdVal) {
       removeFirebaseListener(ref(db, `callSignals/${currentRoomIdVal}/answer`), 'value');
-      if (currentPeerIdVal) removeFirebaseListener(ref(db, `iceCandidates/${currentRoomIdVal}/${currentPeerIdVal}`), 'value');
+      if (currentCallPeerId) removeFirebaseListener(ref(db, `iceCandidates/${currentRoomIdVal}/${currentCallPeerId}`), 'value');
       if (myCurrentId) removeFirebaseListener(ref(db, `iceCandidates/${currentRoomIdVal}/${myCurrentId}`), 'value');
     }
 
     await cleanupCallData();
 
-    if (showReveal && currentPeerIdVal && wasConnected) {
-      let peerToReveal: OnlineUser | UserProfile | null = onlineUsers.find(u => u.id === currentPeerIdVal) || (peerInfo?.id === currentPeerIdVal ? peerInfo : null);
+    if (showReveal && currentCallPeerId && wasConnected) {
+      let peerToReveal: OnlineUser | UserProfile | null = onlineUsers.find(u => u.id === currentCallPeerId) || (peerInfo?.id === currentCallPeerId ? peerInfo : null);
       if (!peerToReveal && authCurrentUser) {
-        addDebugLog(`Peer ${currentPeerIdVal} not readily available. Attempting to fetch their UserProfile if they are a Google User.`);
+        addDebugLog(`Peer ${currentCallPeerId} not readily available. Attempting to fetch their UserProfile if they are a Google User.`);
         try {
-          const userRef = ref(db, `users/${currentPeerIdVal}`);
+          const userRef = ref(db, `users/${currentCallPeerId}`);
           const snapshot = await get(userRef);
           if (snapshot.exists()) {
             peerToReveal = snapshot.val() as UserProfile;
-            addDebugLog(`Fetched full UserProfile for revealed peer ${currentPeerIdVal}`);
+            addDebugLog(`Fetched full UserProfile for revealed peer ${currentCallPeerId}`);
           } else {
-            addDebugLog(`No UserProfile found for ${currentPeerIdVal}. They might be anonymous or profile doesn't exist.`);
+            addDebugLog(`No UserProfile found for ${currentCallPeerId}. They might be anonymous or profile doesn't exist.`);
           }
         } catch (e: any) {
-          addDebugLog(`Error fetching UserProfile for revealed peer ${currentPeerIdVal}: ${e.message}`);
+          addDebugLog(`Error fetching UserProfile for revealed peer ${currentCallPeerId}: ${e.message}`);
         }
       }
       if (!peerToReveal) {
-        addDebugLog(`Peer ${currentPeerIdVal} still not found. Constructing minimal peer info for reveal.`);
-        const tempPeerIsLikelyGoogleUser = onlineUsers.find(u => u.id === currentPeerIdVal)?.isGoogleUser || false;
+        addDebugLog(`Peer ${currentCallPeerId} still not found. Constructing minimal peer info for reveal.`);
+        const tempPeerIsLikelyGoogleUser = onlineUsers.find(u => u.id === currentCallPeerId)?.isGoogleUser || false;
         peerToReveal = {
-          id: currentPeerIdVal, name: `User-${currentPeerIdVal.substring(0,4)}`,
-          photoUrl: `https://placehold.co/96x96.png?text=${currentPeerIdVal.charAt(0).toUpperCase()}`,
-          dataAiHint: 'abstract character', countryCode: onlineUsers.find(u => u.id === currentPeerIdVal)?.countryCode || 'XX',
+          id: currentCallPeerId, name: `User-${currentCallPeerId.substring(0,4)}`,
+          photoUrl: `https://placehold.co/96x96.png?text=${currentCallPeerId.charAt(0).toUpperCase()}`,
+          dataAiHint: 'abstract character', countryCode: onlineUsers.find(u => u.id === currentCallPeerId)?.countryCode || 'XX',
           isGoogleUser: tempPeerIsLikelyGoogleUser
         };
       }
       setPeerInfo(peerToReveal); wrappedSetChatState('revealed');
-      addDebugLog(`Call ended. Transitioning to 'revealed' state with peer ${peerToReveal?.name || currentPeerIdVal}.`);
+      addDebugLog(`Call ended. Transitioning to 'revealed' state with peer ${peerToReveal?.name || currentCallPeerId}.`);
     } else {
       wrappedSetChatState('idle'); setPeerInfo(null);
       addDebugLog(`Call ended. Transitioning to 'idle' state (no reveal or peerId missing/not connected).`);
     }
     roomIdRef.current = null;
-    // Only clear peerId if truly idle or revealed. If initiating new chat, peerId might be set.
-    // This is now handled by the direct chat initiation logic.
-    // if (chatStateRef.current === 'idle' || chatStateRef.current === 'revealed') {
-    //   peerIdRef.current = null;
-    // }
+    peerIdRef.current = null; // Clear active call peer
     isCallerRef.current = false;
+    setIsInCallChatOpen(false); // Close in-call chat panel
 
-    // Clear chat panel if it was open for this call, unless a new chat is being initiated.
-    // This logic is complex. Let's assume if chatState goes to idle/revealed, chat panel should clear.
-    if (chatStateRef.current === 'idle' || chatStateRef.current === 'revealed') {
-        setCurrentDirectChatId(null);
-        setDirectChatMessages([]);
-        setIsDirectChatPanelOpen(false);
+    // Do NOT clear general chat UI (selectedChatPeer, currentDirectChatId etc.) here,
+    // as it's managed separately unless the revealed peer is the same as selectedChatPeer.
+    if (chatStateRef.current === 'revealed' && selectedChatPeer && peerInfo && selectedChatPeer.id === peerInfo.id) {
+      // If revealed peer is the one in active chat view, maybe do nothing or keep it.
+      // Or, if we want to go "back" from revealed to the chat list:
+      // setIsChatUIVisible(true); // Keep chat UI open, but no specific peer selected by default
+      // setSelectedChatPeer(null); // Or keep them selected if desired.
     }
 
-  }, [cleanupWebRTC, cleanupCallData, onlineUsers, peerInfo, removeFirebaseListener, addDebugLog, wrappedSetChatState, authCurrentUser, stopRingingSound]);
+  }, [cleanupWebRTC, cleanupCallData, onlineUsers, peerInfo, selectedChatPeer, removeFirebaseListener, addDebugLog, wrappedSetChatState, authCurrentUser, stopRingingSound]);
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
     const myId = currentSessionUserIdRef.current;
@@ -422,7 +413,7 @@ export default function HomePage() {
       }
     };
     pc.onicecandidate = (event) => {
-      const currentRoom = roomIdRef.current; // For 1-to-1 calls
+      const currentRoom = roomIdRef.current;
       if (event.candidate && currentRoom && myId) {
         addDebugLog(`Generated ICE candidate for 1-to-1 room ${currentRoom}: ${event.candidate.candidate.substring(0,30)}...`);
         const candidatesRefPath = `iceCandidates/${currentRoom}/${myId}`;
@@ -440,12 +431,7 @@ export default function HomePage() {
         if (['connecting', 'dialing'].includes(chatStateRef.current)) {
           addDebugLog("ICE fully connected/completed, setting chat state to 'connected'.");
           wrappedSetChatState('connected');
-          // Setup direct chat ID when connected
-          if (sessionUser?.id && peerIdRef.current) {
-            const directChatId = getDirectChatId(sessionUser.id, peerIdRef.current);
-            setCurrentDirectChatId(directChatId);
-            addDebugLog(`Direct chat ID set on connection: ${directChatId}`);
-          }
+          // No need to set direct chat ID here, that's for general chat UI
         }
       } else if (['failed', 'disconnected', 'closed'].includes(iceState)) {
         if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
@@ -460,7 +446,7 @@ export default function HomePage() {
       addDebugLog(`Signaling state changed: ${peerConnectionRef.current.signalingState}`);
     };
     return pc;
-  }, [handleEndCall, toast, addDebugLog, wrappedSetChatState, sessionUser]);
+  }, [handleEndCall, toast, addDebugLog, wrappedSetChatState]);
 
   const startLocalStream = useCallback(async (): Promise<MediaStream | null> => {
     const myId = currentSessionUserIdRef.current;
@@ -501,12 +487,11 @@ export default function HomePage() {
     addDebugLog(`Initiating direct call from ${sUser.id} to ${targetUser.name} (${targetUser.id}).`);
     if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') {
       addDebugLog(`In non-idle state (${chatStateRef.current}), ending existing call/chat before initiating new one.`);
-      await handleEndCall(false); // End previous call/chat session
+      await handleEndCall(false);
     }
-    // Reset chat panel related state
-    setCurrentDirectChatId(null);
-    setDirectChatMessages([]);
-    setIsDirectChatPanelOpen(false);
+    setIsChatUIVisible(false); // Hide general chat UI when a call starts
+    setSelectedChatPeer(null);
+    setIsInCallChatOpen(false);
 
     wrappedSetChatState('dialing'); setPeerInfo(targetUser);
     peerIdRef.current = targetUser.id; isCallerRef.current = true;
@@ -515,9 +500,9 @@ export default function HomePage() {
     const pc = initializePeerConnection(stream);
     if (!pc) { addDebugLog("Failed to initialize peer connection."); toast({ title: "WebRTC Error", variant: "destructive" }); await handleEndCall(false); return; }
     peerConnectionRef.current = pc;
-    const new1to1RoomId = push(child(ref(db), 'callRooms')).key; // Specific to 1-to-1
+    const new1to1RoomId = push(child(ref(db), 'callRooms')).key; 
     if (!new1to1RoomId) { addDebugLog("Could not create room ID."); toast({title: "Error", description: "Could not create room.", variant: "destructive"}); await handleEndCall(false); return; }
-    roomIdRef.current = new1to1RoomId; // Store 1-to-1 room ID
+    roomIdRef.current = new1to1RoomId; 
     addDebugLog(`Assigned new 1-to-1 room ID: ${new1to1RoomId} for call between ${sUser.id} and ${targetUser.id}`);
     try {
       const offer = await pc.createOffer();
@@ -588,13 +573,12 @@ export default function HomePage() {
     }
     addDebugLog(`Callee ${sUser.id}: Processing incoming offer from ${offerData.callerName} (${offerData.callerId}). Room: ${offerData.roomId}.`);
     
-    // Reset chat panel related state
-    setCurrentDirectChatId(null);
-    setDirectChatMessages([]);
-    setIsDirectChatPanelOpen(false);
+    setIsChatUIVisible(false); // Hide general chat UI when a call starts
+    setSelectedChatPeer(null);
+    setIsInCallChatOpen(false);
 
     wrappedSetChatState('connecting');
-    peerIdRef.current = offerData.callerId; roomIdRef.current = offerData.roomId; isCallerRef.current = false; // roomIdRef set for 1-to-1 call
+    peerIdRef.current = offerData.callerId; roomIdRef.current = offerData.roomId; isCallerRef.current = false; 
     const peerForInfo: OnlineUser = {
       id: offerData.callerId, name: offerData.callerName, photoUrl: offerData.callerPhotoUrl,
       countryCode: offerData.callerCountryCode || 'XX', isGoogleUser: offerData.callerIsGoogleUser || false,
@@ -741,7 +725,6 @@ export default function HomePage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionUser, isManuallyOnline]);
 
-  // Presence for anonymous users (onDisconnect)
   useEffect(() => {
     if (authCurrentUser || !anonymousSessionId || !sessionUser || sessionUser.id !== anonymousSessionId || sessionUser.isGoogleUser) {
       addDebugLog(`Anonymous Presence (connection): Skipping. Conditions: authCurrentUser=${!!authCurrentUser}, anonymousSessionId=${anonymousSessionId}, sessionUser.id=${sessionUser?.id}, sessionUser.isGoogleUser=${sessionUser?.isGoogleUser}`);
@@ -759,7 +742,7 @@ export default function HomePage() {
       if (snapshot.val() === true) {
         addDebugLog(`Anonymous Presence (connection): Firebase connection established for ${myId}.`);
         if (isManuallyOnline && isPageVisibleRef.current) {
-           updateUserOnlineStatus(true); // This already handles onDisconnect setup for anonymous
+           updateUserOnlineStatus(true); 
         }
       } else {
         addDebugLog(`Anonymous Presence (connection): Firebase connection lost for ${myId}. onDisconnect should handle removal.`);
@@ -769,7 +752,6 @@ export default function HomePage() {
     return () => {
       addDebugLog(`Anonymous Presence (connection): Cleaning up for ${myId}. Detaching .info/connected listener.`);
       removeFirebaseListener(connectedDbRef, 'value');
-      // No need to explicitly remove user here, as onDisconnect in updateUserOnlineStatus should handle it if it was set
     };
   }, [authCurrentUser, anonymousSessionId, sessionUser, addFirebaseListener, removeFirebaseListener, addDebugLog, isManuallyOnline, updateUserOnlineStatus]);
 
@@ -826,10 +808,9 @@ export default function HomePage() {
             }
             return;
         }
-
-        // If already in a call or dialing, or if direct chat is open (implying an interaction)
-        if (chatStateRef.current !== 'idle' || (isDirectChatPanelOpen && currentDirectChatId)) {
-          addDebugLog(`WARN: ${myId} received offer from ${newOfferData.callerId} (room ${newOfferData.roomId}) while busy (state ${chatStateRef.current} or chat panel open). Removing this offer from DB.`);
+        
+        if (chatStateRef.current !== 'idle' || isChatUIVisible) { // Also check if general chat UI is open
+          addDebugLog(`WARN: ${myId} received offer from ${newOfferData.callerId} (room ${newOfferData.roomId}) while busy (state ${chatStateRef.current} or general chat UI open). Removing this offer from DB.`);
           if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
              remove(incomingCallDbRef).catch(e => addDebugLog(`WARN: Error removing offer (user busy) by ${myId} from DB: ${e.message || e}`));
           }
@@ -837,7 +818,7 @@ export default function HomePage() {
             setIncomingCallOfferDetails(null);
             stopRingingSound();
           }
-        } else { // User is idle and no direct chat open
+        } else { 
           if (!currentDisplayedOffer || currentDisplayedOffer.roomId !== newOfferData.roomId) {
             addDebugLog(`Valid new/different offer for ${myId} from ${newOfferData.callerName}. Setting to state. New Room: ${newOfferData.roomId}`);
             setIncomingCallOfferDetails(newOfferData);
@@ -847,7 +828,7 @@ export default function HomePage() {
             addDebugLog(`Offer listener: Received same offer data (Room: ${newOfferData.roomId}) as currently displayed. No state change needed.`);
           }
         }
-      } else { // newOfferData is null (offer removed from Firebase)
+      } else { 
         addDebugLog(`Offer listener at ${incomingCallDbRefPath} received null data.`);
         if (currentDisplayedOffer) {
           addDebugLog(`Pending offer (room ${currentDisplayedOffer.roomId}) removed for ${myId}. Clearing displayed offer & stopping ring.`);
@@ -864,22 +845,37 @@ export default function HomePage() {
       stopRingingSound();
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentSessionUserIdRef.current, isManuallyOnline, isDirectChatPanelOpen, currentDirectChatId]); // Removed add/remove listener, play/stop, toast deps as they are stable
+  }, [currentSessionUserIdRef.current, isManuallyOnline, isChatUIVisible]);
 
 
-  // Listener for Direct Chat Messages
+  // Listener for Direct Chat Messages (based on selectedChatPeer now)
   useEffect(() => {
-    if (!currentDirectChatId || !sessionUser?.id) {
-      if (currentDirectChatId) {
-        const chatPath = `directChats/${currentDirectChatId}/messages`;
-        removeFirebaseListener(query(ref(db, chatPath)), 'value'); // Use query for consistency with how it might be added
+    if (!selectedChatPeer || !sessionUser?.id) {
+      if (currentDirectChatId) { // If a chat ID was previously active, clean its listener
+        const oldChatPath = `directChats/${currentDirectChatId}/messages`;
+        removeFirebaseListener(query(ref(db, oldChatPath), orderByKey(), limitToLast(50)), 'value');
         setDirectChatMessages([]);
+        setCurrentDirectChatId(null);
       }
       return;
     }
 
-    addDebugLog(`Attaching direct chat listener for chat ID: ${currentDirectChatId}`);
-    const directChatMessagesQuery = query(ref(db, `directChats/${currentDirectChatId}/messages`), orderByKey(), limitToLast(50));
+    const newDirectChatId = getDirectChatId(sessionUser.id, selectedChatPeer.id);
+    if (newDirectChatId === currentDirectChatId) { // Already listening to this chat
+      addDebugLog(`Direct chat listener: Already listening to ${newDirectChatId}.`);
+      return;
+    }
+
+    // Clean up old listener if switching chats
+    if (currentDirectChatId) {
+      const oldChatPath = `directChats/${currentDirectChatId}/messages`;
+      removeFirebaseListener(query(ref(db, oldChatPath), orderByKey(), limitToLast(50)), 'value');
+    }
+    
+    setCurrentDirectChatId(newDirectChatId);
+    setDirectChatMessages([]); // Clear messages when switching
+    addDebugLog(`Attaching direct chat listener for chat ID: ${newDirectChatId}`);
+    const directChatMessagesQuery = query(ref(db, `directChats/${newDirectChatId}/messages`), orderByKey(), limitToLast(50));
     
     const directChatCallback = (snapshot: any) => {
       const messages: ChatMessage[] = [];
@@ -887,16 +883,16 @@ export default function HomePage() {
         messages.push({ id: childSnapshot.key!, ...childSnapshot.val() } as ChatMessage);
       });
       setDirectChatMessages(messages);
-      addDebugLog(`Direct chat messages updated for ${currentDirectChatId}. Count: ${messages.length}`);
+      addDebugLog(`Direct chat messages updated for ${newDirectChatId}. Count: ${messages.length}`);
     };
 
     addFirebaseListener(directChatMessagesQuery, directChatCallback, 'value');
 
     return () => {
-      addDebugLog(`Cleaning up direct chat listener for chat ID: ${currentDirectChatId}`);
+      addDebugLog(`Cleaning up direct chat listener for chat ID: ${newDirectChatId}`);
       removeFirebaseListener(directChatMessagesQuery, 'value');
     };
-  }, [currentDirectChatId, sessionUser?.id, addFirebaseListener, removeFirebaseListener, addDebugLog]);
+  }, [selectedChatPeer, sessionUser?.id, addFirebaseListener, removeFirebaseListener, addDebugLog, currentDirectChatId]);
 
 
   useEffect(() => {
@@ -949,17 +945,18 @@ export default function HomePage() {
       addDebugLog(`Full cleanup on unmount complete for ${myIdOnUnmount || 'N/A'}.`);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isManuallyOnline]); // Removed authCurrentUser as it's implicitly handled via sessionUser updates
+  }, [isManuallyOnline]);
 
   const handleBackToOnlineUsers = async () => {
     addDebugLog(`Handling back to online users from revealed state.`);
     wrappedSetChatState('idle'); setPeerInfo(null);
     peerIdRef.current = null; roomIdRef.current = null; isCallerRef.current = false;
     cleanupWebRTC(); await cleanupCallData();
-    // Clear chat specific states
-    setCurrentDirectChatId(null);
-    setDirectChatMessages([]);
-    setIsDirectChatPanelOpen(false);
+    // Do not reset general chat UI (isChatUIVisible, selectedChatPeer) here
+    // as user might want to continue chatting with the revealed peer
+    // or go back to the chat list.
+    // Only reset in-call chat.
+    setIsInCallChatOpen(false);
   };
 
   const toggleMic = () => {
@@ -1063,45 +1060,41 @@ export default function HomePage() {
     }
   }, [currentDirectChatId, sessionUser, toast, addDebugLog]);
 
-  const handleInitiateDirectChat = useCallback((targetUser: OnlineUser) => {
+  // For dual-panel chat UI
+  const handleInitiateOrSelectChat = useCallback((targetUser: OnlineUser) => {
     if (!sessionUser) {
-        addDebugLog("handleInitiateDirectChat: No session user.");
+        addDebugLog("handleInitiateOrSelectChat: No session user.");
         toast({ title: "Error", description: "Session not ready.", variant: "destructive" });
         return;
     }
     if (targetUser.id === sessionUser.id) {
-        addDebugLog("handleInitiateDirectChat: Cannot chat with self.");
+        addDebugLog("handleInitiateOrSelectChat: Cannot chat with self.");
         toast({ title: "Error", description: "Cannot chat with yourself.", variant: "default" });
         return;
     }
-    if (!isManuallyOnline) {
-      toast({ title: "You are Offline", description: "Go online to chat.", variant: "default" });
-      addDebugLog(`Chat attempt by ${sessionUser.id} to ${targetUser.id} blocked: user is manually offline.`);
+    if (!isManuallyOnline && chatState === 'idle') { // Only block if trying to start new chat while offline & idle
+      toast({ title: "You are Offline", description: "Go online to start new chats.", variant: "default" });
+      addDebugLog(`Chat attempt by ${sessionUser.id} to ${targetUser.id} blocked: user is manually offline and idle.`);
       return;
     }
 
-    addDebugLog(`Initiating direct chat with ${targetUser.name} (${targetUser.id})`);
+    addDebugLog(`Initiating/Selecting direct chat with ${targetUser.name} (${targetUser.id})`);
     
-    // If in an active call with someone else, end it first
     if ((chatStateRef.current === 'connected' || chatStateRef.current === 'dialing' || chatStateRef.current === 'connecting') && peerIdRef.current !== targetUser.id) {
-        addDebugLog(`Ending existing call with ${peerIdRef.current} to start chat with ${targetUser.id}`);
-        handleEndCall(false); // End call, no reveal as we are starting a new interaction
-    } else if (chatStateRef.current === 'revealed') { // If in revealed state, clear it
+        addDebugLog(`Ending existing call with ${peerIdRef.current} to focus chat with ${targetUser.id}`);
+        handleEndCall(false); 
+    } else if (chatStateRef.current === 'revealed') { 
         wrappedSetChatState('idle');
     }
 
-    const newDirectChatId = getDirectChatId(sessionUser.id, targetUser.id);
-    setCurrentDirectChatId(newDirectChatId);
-    setPeerInfo(targetUser); // Set peerInfo for chat panel title and context
-    peerIdRef.current = targetUser.id; // Keep track of who we are chatting with
-    setIsDirectChatPanelOpen(true);
-    
-    // If currently in a call with THIS user, do nothing more.
-    // If not in a call, ensure chatState is idle to show main UI + chat panel.
-    if (chatStateRef.current !== 'connected' || peerIdRef.current !== targetUser.id) {
-       if (chatStateRef.current !== 'idle') wrappedSetChatState('idle');
-    }
-    addDebugLog(`Direct chat setup with ${targetUser.name}. Chat ID: ${newDirectChatId}. Panel open: true.`);
+    setActiveChatPeers(prevPeers => {
+      if (prevPeers.find(p => p.id === targetUser.id)) return prevPeers;
+      return [...prevPeers, targetUser];
+    });
+    setSelectedChatPeer(targetUser); // This will trigger useEffect for messages
+    setPeerInfo(targetUser); // For ChatPanel title context
+    setIsChatUIVisible(true); // Show the dual-panel UI
+    addDebugLog(`Direct chat setup with ${targetUser.name}. Panel open: true.`);
   }, [sessionUser, toast, handleEndCall, isManuallyOnline, wrappedSetChatState, addDebugLog]);
 
 
@@ -1157,134 +1150,121 @@ export default function HomePage() {
       </MainLayout>
     );
   }
-
-  return (
-    <MainLayout>
-      <audio ref={ringingAudioRef} src="/ringing.mp3" preload="auto" />
-
-      <IncomingCallDialog
-        isOpen={!!incomingCallOfferDetails && chatState === 'idle' && isManuallyOnline && !isDirectChatPanelOpen}
-        offer={incomingCallOfferDetails}
-        onAccept={handleAcceptCall}
-        onDecline={handleDeclineCall}
-      />
-
-      <div className="absolute top-4 right-4 flex gap-2">
-        {!authCurrentUser ? (
-          <Button onClick={signInWithGoogle} variant="outline">
-            <LogIn className="mr-2 h-4 w-4" /> Sign in with Google
-          </Button>
-        ) : (
-          <>
-            {authUserProfile && (
-              <Button onClick={() => setIsProfileEditDialogOpen(true)} variant="outline">
-                <Edit3 className="mr-2 h-4 w-4" /> Edit Profile
-              </Button>
-            )}
-            <Button onClick={signOutUser} variant="outline">
-              <LogOut className="mr-2 h-4 w-4" /> Sign Out
-            </Button>
-            {authUserProfile && authCurrentUser && (
-              <ProfileSetupDialog
-                isOpen={isProfileEditDialogOpen} onOpenChange={setIsProfileEditDialogOpen}
-                user={{
-                  id: authCurrentUser.uid, displayName: authCurrentUser.displayName || '',
-                  email: authCurrentUser.email || '', photoUrl: authCurrentUser.photoURL || undefined
-                }}
-                onSave={handleProfileSave} isEditing={true} existingProfile={authUserProfile}
-              />
-            )}
-          </>
-        )}
-      </div>
-
-      <div className="text-center mb-4">
-        <h1 className="text-4xl font-bold text-primary mb-2">BlindSpot Social v1.1</h1>
-        <p className="text-lg text-foreground/80">Connect Directly. Chat Visually. Create Rooms.</p>
-      </div>
-
-      {chatState === 'idle' && sessionUser && !incomingCallOfferDetails && (
-        <div className="flex flex-col items-center gap-6 p-6 bg-card rounded-xl shadow-xl w-full max-w-lg">
-          <Card className="w-full shadow-md border-primary/50">
-            <CardHeader className="items-center text-center pb-4">
-              <Avatar className="w-20 h-20 mb-3 border-2 border-primary shadow-sm">
-                <AvatarImage src={sessionUser.photoUrl} alt={sessionUser.name} data-ai-hint={sessionUser.dataAiHint || "avatar abstract"} />
-                <AvatarFallback>{sessionUser.name.charAt(0).toUpperCase()}</AvatarFallback>
-              </Avatar>
-              <CardTitle className="text-xl">
-                {sessionUser.name}
-                {sessionUser.isGoogleUser && <span className="text-xs text-primary font-semibold ml-1">(Google)</span>}
-                {sessionUser.countryCode && ` (${sessionUser.countryCode})`}
-              </CardTitle>
-              <CardDescription className="text-sm text-muted-foreground">Your current ID: {sessionUser.id.substring(0,8)}...</CardDescription>
-            </CardHeader>
-            <CardContent className="pt-0 pb-4 flex justify-center">
-               <Button onClick={handleToggleOnlineStatus} variant={isManuallyOnline ? "outline" : "default"} size="sm">
-                {isManuallyOnline ? <WifiOff className="mr-2 h-4 w-4" /> : <Wifi className="mr-2 h-4 w-4" />}
-                {isManuallyOnline ? "Go Offline" : "Go Online"}
-              </Button>
-            </CardContent>
-          </Card>
-
-          <Card className="w-full shadow-md">
-            <CardHeader>
-              <CardTitle className="text-xl flex items-center gap-2"><UsersIcon className="w-5 h-5 text-primary" />Conference Rooms</CardTitle>
-              <CardDescription>Create a room and share the link for group video calls.</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {!createdRoomId ? (
-                <Button onClick={handleCreateRoom} className="w-full">
-                  <Link2 className="mr-2 h-4 w-4" /> Create Room Link
+  
+  const mainPageContent = () => {
+    if (chatState === 'idle' && !incomingCallOfferDetails) {
+      if (isChatUIVisible && selectedChatPeer && currentDirectChatId) { // Dual Panel Chat
+        return (
+          <div className="flex flex-col w-full max-w-4xl h-[70vh] md:h-[80vh] bg-card rounded-xl shadow-xl overflow-hidden">
+            <div className="p-2 border-b">
+                <Button variant="outline" size="sm" onClick={() => { setIsChatUIVisible(false); setSelectedChatPeer(null); setCurrentDirectChatId(null);}}>
+                    <ArrowLeft className="mr-2 h-4 w-4" /> Back to Users
                 </Button>
-              ) : (
-                <div className="space-y-3">
-                  <p className="text-sm text-muted-foreground">Room created! Share this link:</p>
-                  <div className="flex gap-2">
-                    <Input type="text" value={roomLink || ""} readOnly className="bg-muted/50"/>
-                    <Button onClick={copyRoomLink} variant="outline" size="icon" aria-label="Copy room link">
-                      <Link2 className="h-4 w-4" />
-                    </Button>
-                  </div>
-                  <Button onClick={handleJoinCreatedRoom} className="w-full">
-                    <VideoIcon className="mr-2 h-4 w-4" /> Go to Room
+            </div>
+            <div className="flex flex-1 overflow-hidden">
+              <div className="w-1/3 min-w-[200px] md:min-w-[250px] h-full">
+                <ChatContactList
+                  peers={activeChatPeers}
+                  selectedPeerId={selectedChatPeer.id}
+                  onSelectPeer={(peer) => {
+                    setSelectedChatPeer(peer);
+                    setPeerInfo(peer); // Update context for ChatPanel title
+                  }}
+                />
+              </div>
+              <div className="flex-1 h-full border-l">
+                <ChatPanel
+                  messages={directChatMessages}
+                  onSendMessage={handleSendDirectMessage}
+                  currentUserId={sessionUser.id}
+                  chatRoomId={currentDirectChatId}
+                  chatTitle={`Chat with ${selectedChatPeer.name}`}
+                  isLoading={!currentDirectChatId}
+                />
+              </div>
+            </div>
+          </div>
+        );
+      } else { // Default Idle View (Online Users, etc.)
+        return (
+          <div className="flex flex-col items-center gap-6 p-6 bg-card rounded-xl shadow-xl w-full max-w-lg">
+            <Card className="w-full shadow-md border-primary/50">
+              <CardHeader className="items-center text-center pb-4">
+                <Avatar className="w-20 h-20 mb-3 border-2 border-primary shadow-sm">
+                  <AvatarImage src={sessionUser.photoUrl} alt={sessionUser.name} data-ai-hint={sessionUser.dataAiHint || "avatar abstract"} />
+                  <AvatarFallback>{sessionUser.name.charAt(0).toUpperCase()}</AvatarFallback>
+                </Avatar>
+                <CardTitle className="text-xl">
+                  {sessionUser.name}
+                  {sessionUser.isGoogleUser && <span className="text-xs text-primary font-semibold ml-1">(Google)</span>}
+                  {sessionUser.countryCode && ` (${sessionUser.countryCode})`}
+                </CardTitle>
+                <CardDescription className="text-sm text-muted-foreground">Your current ID: {sessionUser.id.substring(0,8)}...</CardDescription>
+              </CardHeader>
+              <CardContent className="pt-0 pb-4 flex justify-center">
+                 <Button onClick={handleToggleOnlineStatus} variant={isManuallyOnline ? "outline" : "default"} size="sm">
+                  {isManuallyOnline ? <WifiOff className="mr-2 h-4 w-4" /> : <Wifi className="mr-2 h-4 w-4" />}
+                  {isManuallyOnline ? "Go Offline" : "Go Online"}
+                </Button>
+              </CardContent>
+            </Card>
+            <Card className="w-full shadow-md">
+              <CardHeader>
+                <CardTitle className="text-xl flex items-center gap-2"><UsersIcon className="w-5 h-5 text-primary" />Conference Rooms</CardTitle>
+                <CardDescription>Create a room and share the link for group video calls.</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {!createdRoomId ? (
+                  <Button onClick={handleCreateRoom} className="w-full">
+                    <Link2 className="mr-2 h-4 w-4" /> Create Room Link
                   </Button>
-                  <Button onClick={() => {setCreatedRoomId(null); setRoomLink(null);}} variant="link" className="text-xs p-0 h-auto">Create a new room</Button>
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-
-          {!isManuallyOnline && !isDirectChatPanelOpen &&(
-            <div className="text-center p-4 my-4 bg-muted/50 rounded-md w-full">
-              <WifiOff className="w-10 h-10 mx-auto text-muted-foreground mb-2" />
-              <p className="font-semibold text-foreground">You are Currently Offline</p>
-              <p className="text-sm text-muted-foreground">Click "Go Online" above to see users and make calls.</p>
-            </div>
-          )}
-
-          {isManuallyOnline && !isDirectChatPanelOpen && (
-            <div className="w-full mt-4">
-              <OnlineUsersPanel
-                onlineUsers={onlineUsers}
-                onInitiateCall={initiateDirectCall}
-                onInitiateChat={handleInitiateDirectChat}
-                currentUserId={sessionUser.id}
-              />
-            </div>
-          )}
-          {isManuallyOnline && onlineUsers.filter(u => u.id !== sessionUser?.id).length > 0 && !isDirectChatPanelOpen &&(
-            <Button onClick={handleFeelingLucky} size="lg" className="mt-4 w-full max-w-xs">
-              <Shuffle className="mr-2 h-5 w-5" />
-              Feeling Lucky? (Random Call)
-            </Button>
-          )}
-        </div>
-      )}
-
-      {(chatState === 'dialing' || chatState === 'connecting' || chatState === 'connected') && (
+                ) : (
+                  <div className="space-y-3">
+                    <p className="text-sm text-muted-foreground">Room created! Share this link:</p>
+                    <div className="flex gap-2">
+                      <Input type="text" value={roomLink || ""} readOnly className="bg-muted/50"/>
+                      <Button onClick={copyRoomLink} variant="outline" size="icon" aria-label="Copy room link">
+                        <Link2 className="h-4 w-4" />
+                      </Button>
+                    </div>
+                    <Button onClick={handleJoinCreatedRoom} className="w-full">
+                      <VideoIcon className="mr-2 h-4 w-4" /> Go to Room
+                    </Button>
+                    <Button onClick={() => {setCreatedRoomId(null); setRoomLink(null);}} variant="link" className="text-xs p-0 h-auto">Create a new room</Button>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+            {!isManuallyOnline &&(
+              <div className="text-center p-4 my-4 bg-muted/50 rounded-md w-full">
+                <WifiOff className="w-10 h-10 mx-auto text-muted-foreground mb-2" />
+                <p className="font-semibold text-foreground">You are Currently Offline</p>
+                <p className="text-sm text-muted-foreground">Click "Go Online" above to see users and make calls/chats.</p>
+              </div>
+            )}
+            {isManuallyOnline && (
+              <div className="w-full mt-4">
+                <OnlineUsersPanel
+                  onlineUsers={onlineUsers}
+                  onInitiateCall={initiateDirectCall}
+                  onInitiateChat={handleInitiateOrSelectChat}
+                  currentUserId={sessionUser.id}
+                />
+              </div>
+            )}
+            {isManuallyOnline && onlineUsers.filter(u => u.id !== sessionUser?.id).length > 0 &&(
+              <Button onClick={handleFeelingLucky} size="lg" className="mt-4 w-full max-w-xs">
+                <Shuffle className="mr-2 h-5 w-5" />
+                Feeling Lucky? (Random Call)
+              </Button>
+            )}
+          </div>
+        );
+      }
+    } else if (chatState === 'dialing' || chatState === 'connecting' || chatState === 'connected') { // Video Call UI
+      return (
         <div className="w-full flex flex-col items-center gap-4">
-          <div className="w-full max-w-2xl"> {/* Container for video and chat */}
+          <div className="w-full max-w-2xl">
             <VideoChatPlaceholder
               localStream={localStream} remoteStream={remoteStream}
               isMicOn={isMicOn} isVideoOn={isVideoOn}
@@ -1296,9 +1276,9 @@ export default function HomePage() {
                 <Button onClick={() => handleEndCall(true)} size="lg" className="flex-1" variant="destructive">
                 <PhoneOff className="mr-2 h-5 w-5" /> End Call
                 </Button>
-                {(chatState === 'connected' || isDirectChatPanelOpen) && currentDirectChatId && ( // Show chat toggle if connected OR if chat panel is open via direct initiation
+                {(chatState === 'connected') && (
                     <Button 
-                        onClick={() => setIsDirectChatPanelOpen(prev => !prev)} 
+                        onClick={() => setIsInCallChatOpen(prev => !prev)} 
                         size="lg" 
                         variant="outline" 
                         className="flex-1"
@@ -1320,37 +1300,23 @@ export default function HomePage() {
                 />
               </div>
             )}
+             {/* Chat Panel during active call */}
+            {chatState === 'connected' && isInCallChatOpen && currentDirectChatId && sessionUser && peerInfo &&(
+              <div className="mt-4 w-full max-w-2xl h-[400px]"> 
+                  <ChatPanel
+                      messages={directChatMessages}
+                      onSendMessage={handleSendDirectMessage}
+                      currentUserId={sessionUser.id}
+                      chatRoomId={currentDirectChatId} // This ID might need to be based on peerIdRef.current if different from selectedChatPeer
+                      chatTitle={`Chat with ${(peerInfo as OnlineUser)?.name || 'Peer'}`}
+                  />
+              </div>
+            )}
           </div>
         </div>
-      )}
-      
-      {/* Standalone Direct Chat Panel - Shown when isDirectChatPanelOpen is true, irrespective of call state, but outside active call UI */}
-      {isDirectChatPanelOpen && currentDirectChatId && sessionUser && peerInfo && chatState !== 'connected' && chatState !== 'dialing' && chatState !== 'connecting' && (
-        <div className="mt-6 w-full max-w-lg p-6 bg-card rounded-xl shadow-xl">
-            <ChatPanel
-                messages={directChatMessages}
-                onSendMessage={handleSendDirectMessage}
-                currentUserId={sessionUser.id}
-                chatRoomId={currentDirectChatId}
-                chatTitle={`Chat with ${(peerInfo as OnlineUser)?.name || 'Peer'}`}
-            />
-        </div>
-      )}
-      {/* Chat Panel during active call */}
-      {chatState === 'connected' && isDirectChatPanelOpen && currentDirectChatId && sessionUser && peerInfo &&(
-        <div className="mt-4 w-full max-w-2xl h-[400px]"> 
-            <ChatPanel
-                messages={directChatMessages}
-                onSendMessage={handleSendDirectMessage}
-                currentUserId={sessionUser.id}
-                chatRoomId={currentDirectChatId}
-                chatTitle={`Chat with ${(peerInfo as OnlineUser)?.name || 'Peer'}`}
-            />
-        </div>
-      )}
-
-
-      {chatState === 'revealed' && (
+      );
+    } else if (chatState === 'revealed') { // Revealed State UI
+      return (
         <div className="w-full flex flex-col items-center gap-8 p-6 bg-card rounded-xl shadow-xl max-w-lg">
           <h2 className="text-3xl font-semibold text-primary">Call Ended</h2>
           {peerInfo ? (
@@ -1389,7 +1355,58 @@ export default function HomePage() {
             )}
           </div>
         </div>
-      )}
+      );
+    }
+    return null; // Fallback for unhandled states or if incomingCallOfferDetails is present
+  };
+
+  return (
+    <MainLayout>
+      <audio ref={ringingAudioRef} src="/ringing.mp3" preload="auto" />
+
+      <IncomingCallDialog
+        isOpen={!!incomingCallOfferDetails && chatState === 'idle' && isManuallyOnline && !isChatUIVisible && !isInCallChatOpen}
+        offer={incomingCallOfferDetails}
+        onAccept={handleAcceptCall}
+        onDecline={handleDeclineCall}
+      />
+
+      <div className="absolute top-4 right-4 flex gap-2">
+        {!authCurrentUser ? (
+          <Button onClick={signInWithGoogle} variant="outline">
+            <LogIn className="mr-2 h-4 w-4" /> Sign in with Google
+          </Button>
+        ) : (
+          <>
+            {authUserProfile && (
+              <Button onClick={() => setIsProfileEditDialogOpen(true)} variant="outline">
+                <Edit3 className="mr-2 h-4 w-4" /> Edit Profile
+              </Button>
+            )}
+            <Button onClick={signOutUser} variant="outline">
+              <LogOut className="mr-2 h-4 w-4" /> Sign Out
+            </Button>
+            {authUserProfile && authCurrentUser && (
+              <ProfileSetupDialog
+                isOpen={isProfileEditDialogOpen} onOpenChange={setIsProfileEditDialogOpen}
+                user={{
+                  id: authCurrentUser.uid, displayName: authCurrentUser.displayName || '',
+                  email: authCurrentUser.email || '', photoUrl: authCurrentUser.photoURL || undefined
+                }}
+                onSave={handleProfileSave} isEditing={true} existingProfile={authUserProfile}
+              />
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="text-center mb-4">
+        <h1 className="text-4xl font-bold text-primary mb-2">BlindSpot Social v1.2</h1>
+        <p className="text-lg text-foreground/80">Connect Directly. Chat Visually. Create Rooms.</p>
+      </div>
+      
+      {mainPageContent()}
+
       <div className="w-full max-w-2xl mt-8">
         <DebugLogPanel logs={debugLogs} />
       </div>

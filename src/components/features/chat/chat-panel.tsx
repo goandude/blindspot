@@ -14,18 +14,20 @@ interface ChatPanelProps {
   messages: ChatMessage[];
   onSendMessage: (text: string, attachments?: File[]) => void; // attachments planned for future
   currentUserId: string | null;
-  chatRoomId: string | null; // For context, might not be used directly for sending if onSendMessage handles it
-  isLoading?: boolean; // To disable input while loading messages or sending
+  chatRoomId: string | null; 
+  isLoading?: boolean; 
   chatTitle?: string;
+  onClose?: () => void; // Optional: For closing the chat panel (e.g., in dual panel view)
 }
 
 export function ChatPanel({
   messages,
   onSendMessage,
   currentUserId,
-  // chatRoomId, // Not directly used in this component's logic for sending yet
+  // chatRoomId, 
   isLoading = false,
-  chatTitle = "Chat"
+  chatTitle = "Chat",
+  onClose
 }: ChatPanelProps) {
   const [newMessage, setNewMessage] = useState('');
   const scrollAreaRef = useRef<HTMLDivElement>(null);
@@ -64,7 +66,6 @@ export function ChatPanel({
   
   const formatTimestamp = (timestamp: any): string => {
     if (!timestamp) return '';
-    // If timestamp is a Firebase ServerValue.TIMESTAMP placeholder, it might not be a number yet
     if (typeof timestamp === 'object' && timestamp.hasOwnProperty('.sv')) {
         return 'sending...'
     }
@@ -79,8 +80,13 @@ export function ChatPanel({
 
   return (
     <div className="flex flex-col h-full bg-card border border-border rounded-lg shadow-md">
-      <header className="p-3 border-b bg-muted/50 rounded-t-lg">
-        <h3 className="text-md font-semibold text-center text-foreground">{chatTitle}</h3>
+      <header className="p-3 border-b bg-muted/50 rounded-t-lg flex items-center justify-between">
+        <h3 className="text-md font-semibold text-center text-foreground flex-grow">{chatTitle}</h3>
+        {onClose && (
+          <Button variant="ghost" size="sm" onClick={onClose} aria-label="Close chat">
+            &times;
+          </Button>
+        )}
       </header>
       <ScrollArea ref={scrollAreaRef} className="flex-grow p-3">
         <div className="space-y-4">
@@ -110,7 +116,6 @@ export function ChatPanel({
                     <p className="text-xs font-semibold mb-0.5 opacity-80">{msg.senderName}</p>
                 )}
                 {msg.text && <p className="text-sm whitespace-pre-wrap break-words">{msg.text}</p>}
-                {/* Placeholder for attachments */}
                 {msg.attachments && msg.attachments.map(att => (
                     <div key={att.id} className="mt-1 p-1 border border-foreground/20 rounded text-xs">
                        File: {att.name} ({(att.size / 1024).toFixed(1)} KB)
@@ -137,10 +142,10 @@ export function ChatPanel({
       </ScrollArea>
       <footer className="p-3 border-t">
         <div className="flex items-center gap-2">
-          <Button variant="ghost" size="icon" onClick={handleAttachFile} disabled={isLoading} aria-label="Attach file">
+          <Button variant="outline" size="icon" onClick={handleAttachFile} disabled={isLoading} aria-label="Attach file">
             <Paperclip className="h-5 w-5" />
           </Button>
-          <Button variant="ghost" size="icon" onClick={handleEmojiPicker} disabled={isLoading} aria-label="Select emoji">
+          <Button variant="outline" size="icon" onClick={handleEmojiPicker} disabled={isLoading} aria-label="Select emoji">
             <Smile className="h-5 w-5" />
           </Button>
           <Input
@@ -150,7 +155,7 @@ export function ChatPanel({
             onChange={handleInputChange}
             onKeyPress={handleKeyPress}
             disabled={isLoading || !currentUserId}
-            className="flex-grow"
+            className="flex-grow text-foreground"
           />
           <Button onClick={handleSendClick} disabled={isLoading || newMessage.trim() === '' || !currentUserId} aria-label="Send message">
             <Send className="h-5 w-5" />
