@@ -701,7 +701,7 @@ export default function HomePage() {
             .then(() => addDebugLog(`onDisconnect().remove() set for anonymous user ${sUser.id}.`))
             .catch(e => addDebugLog(`Error setting onDisconnect for anonymous ${sUser.id}: ${e.message}`));
         } else {
-           addDebugLog(`ERROR - userStatusDbRef or onDisconnect not valid for anon ${sUser.id} in updateUserOnlineStatus.`);
+           addDebugLog(`ERROR - userStatusDbRef or onDisconnect not valid for anon ${sUser.id} in updateUserOnlineStatus. Ref: ${userStatusDbRef}`);
         }
       }
     } else {
@@ -1041,8 +1041,6 @@ export default function HomePage() {
         // This might happen if pop-ups are aggressively blocked.
         addDebugLog("Failed to open room link in new tab, possibly due to pop-up blocker. Falling back to same tab or alerting user.");
         toast({ title: "Pop-up Blocked?", description: "Could not open room in a new tab. Please check your pop-up blocker or copy the link.", variant: "default" });
-        // As a fallback, you might offer to navigate in the same tab, or just rely on the user copying the link.
-        // For now, we'll just inform them.
       }
     } else {
       addDebugLog("handleJoinCreatedRoom: createdRoomId or roomLink is missing.");
@@ -1471,5 +1469,3 @@ export default function HomePage() {
     </MainLayout>
   );
 }
-
-    
