@@ -100,7 +100,6 @@ export default function HomePage() {
   const currentSessionUserIdRef = useRef<string | null>(null);
   const isPageVisibleRef = useRef<boolean>(true);
   const incomingCallOfferDetailsRef = useRef<IncomingCallOffer | null>(null);
-  const previousDirectChatIdRef = useRef<string | null>(null);
 
 
   useEffect(() => {
@@ -871,15 +870,13 @@ export default function HomePage() {
       setCurrentDirectChatId(newDirectChatId);
       setDirectChatMessages([]); // Crucial: Clear messages when chat ID changes for the new selection
     }
-  }, [selectedChatPeer, sessionUser, addDebugLog]); // Corrected dependency array
+  }, [selectedChatPeer, sessionUser, addDebugLog]);
 
 
   // Effect 2: Listens for new messages for the currentDirectChatId
   useEffect(() => {
     if (!currentDirectChatId) {
       addDebugLog(`Message Listener Effect: No currentDirectChatId. Listener not attached.`);
-      // If there was a previous chat ID, its listener should have been cleaned up
-      // by this effect's own cleanup when currentDirectChatId changed.
       return;
     }
 
@@ -896,7 +893,6 @@ export default function HomePage() {
     };
 
     addFirebaseListener(directChatMessagesQuery, directChatCallback, 'value');
-    // Store the current chat ID for which this listener was set up
     const listenerChatId = currentDirectChatId; 
 
     return () => {
@@ -1015,6 +1011,11 @@ export default function HomePage() {
 
   const handleCreateRoom = () => {
     addDebugLog("Creating new conference room.");
+    if (typeof window === 'undefined') { // Guard against server-side execution
+        addDebugLog("handleCreateRoom: window is undefined, cannot proceed.");
+        toast({ title: "Error", description: "Cannot create room outside browser.", variant: "destructive" });
+        return;
+    }
     const newRoomKey = push(child(ref(db), 'conferenceRooms')).key;
     if (newRoomKey) {
       setCreatedRoomId(newRoomKey);
@@ -1029,8 +1030,23 @@ export default function HomePage() {
   };
 
   const handleJoinCreatedRoom = () => {
-    if (createdRoomId) {
-      router.push(`/room/${createdRoomId}`);
+    if (createdRoomId && roomLink) {
+      addDebugLog(`Attempting to open room link in new tab: ${roomLink}`);
+      // Try to open the link in a new tab.
+      // 'noopener,noreferrer' are for security and to prevent the new page from accessing window.opener.
+      const newWindow = window.open(roomLink, '_blank', 'noopener,noreferrer');
+      if (newWindow) {
+        newWindow.focus(); // Try to bring the new tab to the front.
+      } else {
+        // This might happen if pop-ups are aggressively blocked.
+        addDebugLog("Failed to open room link in new tab, possibly due to pop-up blocker. Falling back to same tab or alerting user.");
+        toast({ title: "Pop-up Blocked?", description: "Could not open room in a new tab. Please check your pop-up blocker or copy the link.", variant: "default" });
+        // As a fallback, you might offer to navigate in the same tab, or just rely on the user copying the link.
+        // For now, we'll just inform them.
+      }
+    } else {
+      addDebugLog("handleJoinCreatedRoom: createdRoomId or roomLink is missing.");
+      toast({ title: "Error", description: "Room link not available. Please create a room first.", variant: "destructive" });
     }
   };
 
@@ -1114,7 +1130,7 @@ export default function HomePage() {
       return [...prevPeers, targetUser];
     });
     setSelectedChatPeer(targetUser);
-    setPeerInfo(targetUser);
+    setPeerInfo(targetUser); 
     setIsChatUIVisible(true);
     addDebugLog(`Direct chat setup with ${targetUser.name}. Panel open: true.`);
 
@@ -1181,7 +1197,7 @@ export default function HomePage() {
   
   const mainPageContent = () => {
     if (chatState === 'idle' && !incomingCallOfferDetails) {
-      if (isChatUIVisible && selectedChatPeer && sessionUser) { // Ensure sessionUser for ChatPanel
+      if (isChatUIVisible && selectedChatPeer && sessionUser) {
         return (
           <div className="flex flex-col w-full max-w-4xl h-[70vh] md:h-[80vh] bg-card rounded-xl shadow-xl overflow-hidden">
             <div className="p-2 border-b">
@@ -1192,7 +1208,7 @@ export default function HomePage() {
             <div className="flex flex-1 overflow-hidden">
               <div className="w-1/3 min-w-[200px] md:min-w-[250px] h-full">
                 <ChatContactList
-                  peers={activeChatPeers}
+                  peers={activeChatPeers.filter(p => p.id !== sessionUser?.id)}
                   selectedPeerId={selectedChatPeer.id}
                   currentUserId={sessionUser.id}
                   unreadChats={unreadChats}
@@ -1202,7 +1218,7 @@ export default function HomePage() {
                     setPeerInfo(peer); 
                     setUnreadChats(prev => { const newSet = new Set(prev); newSet.delete(peer.id); return newSet; });
                   }}
-                  onCloseChatList={() => setIsChatUIVisible(false)}
+                  onCloseChatList={() => {setIsChatUIVisible(false); setSelectedChatPeer(null);}}
                 />
               </div>
               <div className="flex-1 h-full border-l">
@@ -1317,9 +1333,8 @@ export default function HomePage() {
                         onClick={() => {
                              setIsInCallChatOpen(prev => !prev);
                              if (!isInCallChatOpen && peerInfo && peerInfo.id && sessionUser?.id) {
-                                // Ensure chat ID is set for in-call chat
                                 const callPeer = onlineUsers.find(u => u.id === peerIdRef.current) || (peerInfo as OnlineUser);
-                                if (callPeer) setSelectedChatPeer(callPeer); // This will trigger effect to set currentDirectChatId
+                                if (callPeer) setSelectedChatPeer(callPeer); 
                              }
                         }} 
                         size="lg" 
@@ -1457,5 +1472,4 @@ export default function HomePage() {
   );
 }
 
-          
-        
+    
