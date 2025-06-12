@@ -38,8 +38,6 @@ const servers = {
 const generateAnonymousSessionId = () => Math.random().toString(36).substring(2, 10);
 
 const getDirectChatId = (userId1: string | undefined, userId2: string | undefined): string => {
-  // Guard against undefined user IDs, though this should ideally not happen
-  // if sessionUser and selectedChatPeer are valid.
   if (!userId1 || !userId2) {
     console.warn(`getDirectChatId called with undefined user ID(s): User1: ${userId1}, User2: ${userId2}`);
     return `error_invalid_users_${Math.random().toString(36).substring(2,7)}`;
@@ -119,6 +117,16 @@ export default function HomePage() {
     chatStateRef.current = chatState;
   }, [chatState]);
 
+  // Effect to keep currentSessionUserIdRef in sync with sessionUser.id
+  useEffect(() => {
+    const newId = sessionUser?.id || null;
+    if (currentSessionUserIdRef.current !== newId) {
+      currentSessionUserIdRef.current = newId;
+      addDebugLog(`SYNC: currentSessionUserIdRef.current updated to: ${newId}`);
+    }
+  }, [sessionUser, addDebugLog]);
+
+
  useEffect(() => {
     addDebugLog(`Auth state update: authLoading=${authLoading}, authProfileLoading=${authProfileLoading}, authCurrentUser=${authCurrentUser?.uid}, isProfileSetupNeeded=${isProfileSetupNeeded}, current anonIdState=${anonymousSessionId}`);
 
@@ -139,7 +147,7 @@ export default function HomePage() {
           id: authCurrentUser.uid, name: authUserProfile.name, photoUrl: authUserProfile.photoUrl,
           dataAiHint: authUserProfile.dataAiHint, countryCode: authUserProfile.countryCode, isGoogleUser: true,
         };
-        setSessionUser(googleSessionUser); currentSessionUserIdRef.current = authCurrentUser.uid;
+        setSessionUser(googleSessionUser);
         addDebugLog(`Active session user (Google): ${googleSessionUser.name} (${googleSessionUser.id})`);
         setPageLoading(false);
         if (anonymousSessionId) {
@@ -180,7 +188,7 @@ export default function HomePage() {
           photoUrl: `https://placehold.co/96x96.png?text=${anonymousSessionId.charAt(0).toUpperCase()}`,
           dataAiHint: 'abstract character', countryCode: countryCode, isGoogleUser: false,
         };
-        setSessionUser(anonUser); currentSessionUserIdRef.current = anonymousSessionId;
+        setSessionUser(anonUser);
         addDebugLog(`Anonymous session user created: ${anonUser.name} (${anonUser.id}) with country ${anonUser.countryCode}`);
         setPageLoading(false);
       };
@@ -297,7 +305,8 @@ export default function HomePage() {
       peerConnectionRef.current.onsignalingstatechange = null;
       peerConnectionRef.current.getSenders().forEach(sender => {
         if (sender.track) {
-          addDebugLog(`Stopping sender track: ${sender.track.kind}`);
+          addDebugLog(`Stopping sender track: ${sender.track.kind} (ID: ${sender.track.id})`);
+          sender.track.stop(); 
         }
       });
       if (peerConnectionRef.current.signalingState !== 'closed') {
@@ -307,7 +316,7 @@ export default function HomePage() {
       addDebugLog(`Peer connection closed and nulled.`);
     }
     if (localStream) {
-      localStream.getTracks().forEach(track => { addDebugLog(`Stopping local track: ${track.kind}`); track.stop(); });
+      localStream.getTracks().forEach(track => { addDebugLog(`Stopping local track: ${track.kind} (ID: ${track.id}, Label: ${track.label}, ReadyState: ${track.readyState})`); track.stop(); });
       setLocalStream(null);
       addDebugLog(`Local stream stopped and nulled.`);
     }
@@ -336,7 +345,7 @@ export default function HomePage() {
     const myCurrentId = currentSessionUserIdRef.current;
     const currentCallPeerId = peerIdRef.current;
     const currentRoomIdVal = roomIdRef.current;
-    addDebugLog(`Handling end call. MyID: ${myCurrentId}, CallPeerID: ${currentCallPeerId}, RoomID: ${currentRoomIdVal}. Show reveal: ${showReveal}. Current chat state: ${chatStateRef.current}.`);
+    addDebugLog(`Handling end call. MyID: ${myCurrentId}, CallPeerID: ${currentCallPeerId}, RoomID: ${currentRoomIdVal}. Show reveal: ${showReveal}. Current chat state: ${chatStateRef.current}. LocalStream before cleanupWebRTC: ${localStream ? localStream.id : 'null'}`);
     const wasConnected = ['connected', 'connecting', 'dialing'].includes(chatStateRef.current);
 
     stopRingingSound();
@@ -393,27 +402,28 @@ export default function HomePage() {
       // If revealed peer is the one in active chat view, maybe do nothing or keep it.
     }
 
-  }, [cleanupWebRTC, cleanupCallData, onlineUsers, peerInfo, selectedChatPeer, removeFirebaseListener, addDebugLog, wrappedSetChatState, authCurrentUser, stopRingingSound]);
+  }, [cleanupWebRTC, cleanupCallData, onlineUsers, peerInfo, selectedChatPeer, removeFirebaseListener, addDebugLog, wrappedSetChatState, authCurrentUser, stopRingingSound, localStream]);
 
   const initializePeerConnection = useCallback((currentLocalStream: MediaStream) => {
     const myId = currentSessionUserIdRef.current;
     if (!myId || !currentLocalStream) {
-      addDebugLog(`ERROR: InitializePeerConnection: Missing sessionUser ID (${myId}) or local stream.`);
+      addDebugLog(`ERROR: InitializePeerConnection: Missing sessionUser ID (${myId}) or local stream (ID: ${currentLocalStream?.id}).`);
       return null;
     }
-    addDebugLog(`Initializing RTCPeerConnection for user ${myId}.`);
+    addDebugLog(`Initializing RTCPeerConnection for user ${myId}. Local stream ID: ${currentLocalStream.id}, Tracks: ${currentLocalStream.getTracks().map(t => `${t.kind} (ID: ${t.id}, RS: ${t.readyState})`).join(', ')}`);
     const pc = new RTCPeerConnection(servers);
     currentLocalStream.getTracks().forEach(track => {
-      try { pc.addTrack(track, currentLocalStream); addDebugLog(`Added local track: ${track.kind}`); }
-      catch (e: any) { addDebugLog(`ERROR adding local track ${track.kind}: ${e.message || e}`); }
+      try { pc.addTrack(track, currentLocalStream); addDebugLog(`Added local track: ${track.kind} (ID: ${track.id})`); }
+      catch (e: any) { addDebugLog(`ERROR adding local track ${track.kind} (ID: ${track.id}): ${e.message || e}`); }
     });
     pc.ontrack = (event) => {
-      addDebugLog(`Remote track received: Kind: ${event.track.kind}. Stream(s): ${event.streams.length}`);
+      addDebugLog(`Remote track received: Kind: ${event.track.kind}, ID: ${event.track.id}, readyState: ${event.track.readyState}, muted: ${event.track.muted}. Stream(s): ${event.streams.length}`);
       if (event.streams && event.streams[0]) {
-        setRemoteStream(event.streams[0]); addDebugLog(`Remote stream set from event.streams[0].`);
+        setRemoteStream(event.streams[0]); addDebugLog(`Remote stream set from event.streams[0] (ID: ${event.streams[0].id}).`);
       } else {
+        addDebugLog(`Remote event.streams[0] is null/undefined. Creating new stream from track.`);
         const newStream = new MediaStream([event.track]);
-        setRemoteStream(newStream); addDebugLog(`Remote stream created from event.track and set.`);
+        setRemoteStream(newStream); addDebugLog(`Remote stream created from event.track and set (ID: ${newStream.id}).`);
       }
     };
     pc.onicecandidate = (event) => {
@@ -451,9 +461,9 @@ export default function HomePage() {
     return pc;
   }, [handleEndCall, toast, addDebugLog, wrappedSetChatState]);
 
-  const startLocalStream = useCallback(async (): Promise<MediaStream | null> => {
+  const startLocalStream = useCallback(async (video: boolean = true, audio: boolean = true): Promise<MediaStream | null> => {
     const myId = currentSessionUserIdRef.current;
-    addDebugLog(`Attempting to start local stream for ${myId}.`);
+    addDebugLog(`Attempting to start local stream for ${myId}. Requested: Video=${video}, Audio=${audio}`);
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       addDebugLog("ERROR: getUserMedia not supported on this browser.");
       toast({ title: "Media Error", description: "Your browser does not support camera/microphone access.", variant: "destructive" });
@@ -462,12 +472,16 @@ export default function HomePage() {
       return null;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      setLocalStream(stream); setIsVideoOn(true); setIsMicOn(true);
-      addDebugLog(`Local stream started successfully for ${myId}.`);
+      const stream = await navigator.mediaDevices.getUserMedia({ video, audio });
+      setLocalStream(stream); 
+      const videoTracks = stream.getVideoTracks();
+      const audioTracks = stream.getAudioTracks();
+      setIsVideoOn(videoTracks.length > 0 && videoTracks.every(t => t.enabled));
+      setIsMicOn(audioTracks.length > 0 && audioTracks.every(t => t.enabled));
+      addDebugLog(`Local stream started successfully for ${myId}. Stream ID: ${stream.id}. Tracks: ${stream.getTracks().map(t => `${t.kind} (ID: ${t.id}, Label: ${t.label}, Enabled: ${t.enabled}, ReadyState: ${t.readyState})`).join('; ')}`);
       return stream;
     } catch (err: any) {
-      addDebugLog(`ERROR accessing media devices for ${myId}: ${err.message || err}`);
+      addDebugLog(`ERROR accessing media devices for ${myId} (Req: V=${video},A=${audio}): ${err.message || err}. Stack: ${err.stack}`);
       toast({ title: "Media Error", description: "Could not access camera/microphone.", variant: "destructive" });
       if (chatStateRef.current !== 'idle' && chatStateRef.current !== 'revealed') handleEndCall(false);
       else wrappedSetChatState('idle');
@@ -492,47 +506,73 @@ export default function HomePage() {
       addDebugLog(`In non-idle state (${chatStateRef.current}), ending existing call/chat before initiating new one.`);
       await handleEndCall(false);
     }
+    
     setIsChatUIVisible(false);
     setSelectedChatPeer(null);
     setIsInCallChatOpen(false);
 
+    addDebugLog("Attempting to start local stream for outgoing call...");
+    const stream = await startLocalStream(true, true);
+    if (!stream) { 
+        addDebugLog("Failed to start local stream for outgoing call, aborting call."); 
+        toast({ title: "Media Error", description: "Could not start your camera/mic for the call.", variant: "destructive" });
+        await handleEndCall(false); 
+        return; 
+    }
+    addDebugLog("Local stream started successfully for outgoing call. Initializing peer connection...");
+    const pc = initializePeerConnection(stream);
+    if (!pc) { 
+        addDebugLog("Failed to initialize peer connection for outgoing call."); 
+        toast({ title: "WebRTC Error", description: "Could not setup call connection.", variant: "destructive" }); 
+        await handleEndCall(false); 
+        return; 
+    }
+    addDebugLog("Peer connection initialized for outgoing call.");
+    peerConnectionRef.current = pc;
+    
+    // Now that prerequisites are met, update state
     wrappedSetChatState('dialing'); setPeerInfo(targetUser);
     peerIdRef.current = targetUser.id; isCallerRef.current = true;
-    const stream = await startLocalStream();
-    if (!stream) { addDebugLog("Failed to start local stream, aborting call."); await handleEndCall(false); return; }
-    const pc = initializePeerConnection(stream);
-    if (!pc) { addDebugLog("Failed to initialize peer connection."); toast({ title: "WebRTC Error", variant: "destructive" }); await handleEndCall(false); return; }
-    peerConnectionRef.current = pc;
+    setIsVideoOn(stream.getVideoTracks().length > 0 && stream.getVideoTracks().every(t => t.enabled));
+    setIsMicOn(stream.getAudioTracks().length > 0 && stream.getAudioTracks().every(t => t.enabled));
+
+
     const new1to1RoomId = push(child(ref(db), 'callRooms')).key; 
     if (!new1to1RoomId) { addDebugLog("Could not create room ID."); toast({title: "Error", description: "Could not create room.", variant: "destructive"}); await handleEndCall(false); return; }
     roomIdRef.current = new1to1RoomId; 
     addDebugLog(`Assigned new 1-to-1 room ID: ${new1to1RoomId} for call between ${sUser.id} and ${targetUser.id}`);
+    
     try {
+      addDebugLog(`Caller: Creating offer for room ${new1to1RoomId}.`);
       const offer = await pc.createOffer();
+      addDebugLog(`Caller: Offer created for room ${new1to1RoomId}. Setting local description.`);
       await pc.setLocalDescription(offer);
-      addDebugLog(`Offer created and local description set for 1-to-1 room ${new1to1RoomId}.`);
+      addDebugLog(`Caller: Local description set for room ${new1to1RoomId}.`);
       const offerPayload: IncomingCallOffer = {
         roomId: new1to1RoomId, offer: pc.localDescription!.toJSON(),
         callerId: sUser.id, callerName: sUser.name, callerPhotoUrl: sUser.photoUrl,
         callerCountryCode: sUser.countryCode, callerIsGoogleUser: sUser.isGoogleUser || false,
       };
       const offerPath = `callSignals/${targetUser.id}/pendingOffer`;
+      addDebugLog(`Caller: Sending offer to ${targetUser.id} at ${offerPath} for room ${new1to1RoomId}.`);
       await set(ref(db, offerPath), offerPayload);
       toast({ title: "Calling...", description: `Calling ${targetUser.name}...` });
-      addDebugLog(`Offer sent to ${targetUser.id} at ${offerPath}.`);
+      addDebugLog(`Caller: Offer sent to ${targetUser.id} for room ${new1to1RoomId}.`);
+      
       const answerDbRefPath = `callSignals/${new1to1RoomId}/answer`;
       addFirebaseListener(ref(db, answerDbRefPath), async (snapshot: any) => {
         if (snapshot.exists() && peerConnectionRef.current && peerConnectionRef.current.signalingState !== 'closed') {
           const answerData = snapshot.val() as CallAnswer;
           addDebugLog(`Caller: Received answer from ${answerData.calleeId} for room ${new1to1RoomId}.`);
           if (peerConnectionRef.current.remoteDescription) {
-            addDebugLog(`WARN: Caller: Remote description already set for room ${new1to1RoomId}.`);
+            addDebugLog(`WARN: Caller: Remote description already set for room ${new1to1RoomId}. Current state: ${peerConnectionRef.current.signalingState}`);
+             // Potentially problematic if answer arrives multiple times or race condition
           }
           try {
             await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(answerData.answer));
             addDebugLog(`Caller: Remote desc (answer) set successfully for room ${new1to1RoomId}.`);
           } catch (e: any) {
-            addDebugLog(`ERROR: Caller: setting remote desc (answer) for room ${new1to1RoomId}: ${e.message || e}. PC State: ${peerConnectionRef.current.signalingState}`);
+            addDebugLog(`ERROR: Caller: setting remote desc (answer) for room ${new1to1RoomId}: ${e.message || e}. PC State: ${peerConnectionRef.current.signalingState}. Stack: ${e.stack}`);
             handleEndCall(false); return;
           }
           removeFirebaseListener(ref(db, answerDbRefPath), 'value');
@@ -541,15 +581,17 @@ export default function HomePage() {
           addDebugLog(`Caller: Received answer for room ${new1to1RoomId}, but peer connection is null or closed. Ignoring.`);
         }
       }, 'value');
+
       const calleeIceCandidatesRefPath = `iceCandidates/${new1to1RoomId}/${targetUser.id}`;
       addFirebaseListener(ref(db, calleeIceCandidatesRefPath), (snapshot: any) => {
         snapshot.forEach((childSnapshot: any) => {
           const candidate = childSnapshot.val();
           if (candidate && peerConnectionRef.current && peerConnectionRef.current.remoteDescription && peerConnectionRef.current.signalingState !== 'closed') {
-            addDebugLog(`Caller: Received ICE candidate object from callee ${targetUser.id} for room ${new1to1RoomId}.`);
+            addDebugLog(`Caller: Attempting to add ICE candidate from callee ${targetUser.id} for room ${new1to1RoomId}: ${JSON.stringify(candidate).substring(0,100)}...`);
             if (candidate.candidate && (candidate.sdpMid !== null || candidate.sdpMLineIndex !== null)) {
               peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate))
-                .catch(e => addDebugLog(`ERROR: Caller adding callee ICE for room ${new1to1RoomId}: ${e.message || e}`));
+                .then(() => addDebugLog(`Caller: Successfully added callee ICE for room ${new1to1RoomId}.`))
+                .catch(e => addDebugLog(`ERROR: Caller adding callee ICE for room ${new1to1RoomId}: ${e.message || e}. Candidate: ${JSON.stringify(candidate).substring(0,100)}. Stack: ${e.stack}`));
             } else if (candidate.candidate) {
               addDebugLog(`WARN: Caller: Received ICE with null sdpMid/sdpMLineIndex from callee ${targetUser.id}.`);
             }
@@ -561,8 +603,8 @@ export default function HomePage() {
         });
       }, 'value');
     } catch (error: any) {
-      addDebugLog(`ERROR initiating call from ${sUser.id} to ${targetUser.id} (room ${roomIdRef.current}): ${error.message || error}`);
-      toast({ title: "Call Error", variant: "destructive", description: "Could not initiate call." });
+      addDebugLog(`ERROR initiating call from ${sUser.id} to ${targetUser.id} (room ${roomIdRef.current}): ${error.message || error}. Stack: ${error.stack}`);
+      toast({ title: "Call Error", variant: "destructive", description: "Could not initiate call. " + (error.message || "Unknown signaling error.") });
       await handleEndCall(false);
     }
   }, [sessionUser, initializePeerConnection, handleEndCall, toast, addFirebaseListener, removeFirebaseListener, startLocalStream, addDebugLog, wrappedSetChatState, isManuallyOnline]);
@@ -580,6 +622,25 @@ export default function HomePage() {
     setSelectedChatPeer(null);
     setIsInCallChatOpen(false);
 
+    addDebugLog(`Callee ${sUser.id}: Attempting to start local stream for incoming call...`);
+    const stream = await startLocalStream(true, true);
+    if (!stream) { 
+        addDebugLog(`Callee ${sUser.id}: Failed to start local stream for incoming call room ${offerData.roomId}, aborting call.`); 
+        toast({ title: "Media Error", description: "Could not start your camera/mic for the call.", variant: "destructive" });
+        await handleEndCall(false); 
+        return; 
+    }
+    addDebugLog(`Callee ${sUser.id}: Local stream started. Initializing peer connection for room ${offerData.roomId}.`);
+    const pc = initializePeerConnection(stream);
+    if (!pc) { 
+        addDebugLog(`Callee ${sUser.id}: Failed to initialize peer connection for room ${offerData.roomId}.`); 
+        toast({ title: "WebRTC Error", description: "Could not setup call connection.", variant: "destructive" }); 
+        await handleEndCall(false); return; 
+    }
+    addDebugLog(`Callee ${sUser.id}: Peer connection initialized for room ${offerData.roomId}.`);
+    peerConnectionRef.current = pc;
+
+    // Now that prerequisites are met, update state
     wrappedSetChatState('connecting');
     peerIdRef.current = offerData.callerId; roomIdRef.current = offerData.roomId; isCallerRef.current = false; 
     const peerForInfo: OnlineUser = {
@@ -587,36 +648,40 @@ export default function HomePage() {
       countryCode: offerData.callerCountryCode || 'XX', isGoogleUser: offerData.callerIsGoogleUser || false,
     };
     setPeerInfo(peerForInfo);
+    setIsVideoOn(stream.getVideoTracks().length > 0 && stream.getVideoTracks().every(t => t.enabled));
+    setIsMicOn(stream.getAudioTracks().length > 0 && stream.getAudioTracks().every(t => t.enabled));
+
     toast({ title: "Connecting...", description: `Connecting to ${offerData.callerName}...` });
-    const stream = await startLocalStream();
-    if (!stream) { addDebugLog(`Callee ${sUser.id}: Failed to start local stream, aborting call for room ${offerData.roomId}.`); await handleEndCall(false); return; }
-    const pc = initializePeerConnection(stream);
-    if (!pc) { addDebugLog(`Callee ${sUser.id}: Failed to initialize peer connection for room ${offerData.roomId}.`); toast({ title: "WebRTC Error", variant: "destructive" }); await handleEndCall(false); return; }
-    peerConnectionRef.current = pc;
+    
     try {
+      addDebugLog(`Callee ${sUser.id}: Setting remote description (offer) from ${offerData.callerId} for room ${offerData.roomId}.`);
       await pc.setRemoteDescription(new RTCSessionDescription(offerData.offer));
-      addDebugLog(`Callee ${sUser.id}: Remote desc (offer) set for room ${offerData.roomId}.`);
+      addDebugLog(`Callee ${sUser.id}: Remote desc (offer) set for room ${offerData.roomId}. Creating answer.`);
       const answer = await pc.createAnswer();
+      addDebugLog(`Callee ${sUser.id}: Answer created for room ${offerData.roomId}. Setting local description.`);
       await pc.setLocalDescription(answer);
       addDebugLog(`Callee ${sUser.id}: Local desc (answer) set for room ${offerData.roomId}.`);
       const answerPayload: CallAnswer = {
         answer: pc.localDescription!.toJSON(), calleeId: sUser.id, calleeIsGoogleUser: sUser.isGoogleUser || false,
       };
       const answerPath = `callSignals/${offerData.roomId}/answer`;
+      addDebugLog(`Callee ${sUser.id}: Sending answer to room ${offerData.roomId}.`);
       await set(ref(db, answerPath), answerPayload);
       addDebugLog(`Callee ${sUser.id}: Answer sent to room ${offerData.roomId}.`);
       const myOfferPath = `callSignals/${sUser.id}/pendingOffer`;
       await remove(ref(db, myOfferPath));
       addDebugLog(`Callee ${sUser.id}: Removed processed pending offer from ${myOfferPath}.`);
+      
       const callerIceCandidatesRefPath = `iceCandidates/${offerData.roomId}/${offerData.callerId}`;
       addFirebaseListener(ref(db, callerIceCandidatesRefPath), (snapshot: any) => {
         snapshot.forEach((childSnapshot: any) => {
           const candidate = childSnapshot.val();
           if (candidate && peerConnectionRef.current && peerConnectionRef.current.remoteDescription && peerConnectionRef.current.signalingState !== 'closed') {
-            addDebugLog(`Callee ${sUser.id}: Received ICE candidate object from caller ${offerData.callerId}.`);
+             addDebugLog(`Callee ${sUser.id}: Attempting to add ICE candidate from caller ${offerData.callerId} for room ${offerData.roomId}: ${JSON.stringify(candidate).substring(0,100)}...`);
             if (candidate.candidate && (candidate.sdpMid !== null || candidate.sdpMLineIndex !== null)) {
               peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate))
-                .catch(e => addDebugLog(`ERROR: Callee ${sUser.id} adding caller ICE for room ${offerData.roomId}: ${e.message || e}`));
+                .then(() => addDebugLog(`Callee ${sUser.id}: Successfully added caller ICE for room ${offerData.roomId}.`))
+                .catch(e => addDebugLog(`ERROR: Callee ${sUser.id} adding caller ICE for room ${offerData.roomId}: ${e.message || e}. Candidate: ${JSON.stringify(candidate).substring(0,100)}. Stack: ${e.stack}`));
             } else if (candidate.candidate) {
               addDebugLog(`WARN: Callee ${sUser.id}: Received ICE with null sdpMid/sdpMLineIndex from caller ${offerData.callerId}.`);
             }
@@ -628,8 +693,8 @@ export default function HomePage() {
         });
       }, 'value');
     } catch (error: any) {
-      addDebugLog(`Callee ${sUser.id}: ERROR processing offer for room ${offerData.roomId}: ${error.message || error}`);
-      toast({ title: "Call Error", variant: "destructive", description: "Could not process incoming call." });
+      addDebugLog(`Callee ${sUser.id}: ERROR processing offer for room ${offerData.roomId}: ${error.message || error}. Stack: ${error.stack}`);
+      toast({ title: "Call Error", variant: "destructive", description: "Could not process incoming call. " + (error.message || "Unknown signaling error.") });
       await handleEndCall(false);
     }
   }, [sessionUser, initializePeerConnection, handleEndCall, toast, addFirebaseListener, startLocalStream, addDebugLog, wrappedSetChatState]);
@@ -781,9 +846,9 @@ export default function HomePage() {
   }, [addFirebaseListener, removeFirebaseListener, addDebugLog]);
 
   useEffect(() => {
-    const myId = currentSessionUserIdRef.current;
+    const myId = sessionUser?.id; // Use sessionUser.id directly
     if (!myId) {
-      addDebugLog(`Incoming call listener: No active user ID (currentSessionUserIdRef is ${myId}).`);
+      addDebugLog(`Incoming call listener: No active user ID (sessionUser.id is ${myId}).`);
       if (incomingCallOfferDetailsRef.current) {
         setIncomingCallOfferDetails(null);
         stopRingingSound();
@@ -799,7 +864,7 @@ export default function HomePage() {
       const newOfferData = snapshot.val() as IncomingCallOffer | null;
       const currentDisplayedOffer = incomingCallOfferDetailsRef.current;
 
-      addDebugLog(`Offer listener triggered. New data exists: ${!!newOfferData}. Current displayed offer RoomID: ${currentDisplayedOffer?.roomId}. Chat state: ${chatStateRef.current}. Manually Online: ${isManuallyOnline}`);
+      addDebugLog(`Offer listener triggered for ${myId}. New data exists: ${!!newOfferData}. Current displayed offer RoomID: ${currentDisplayedOffer?.roomId}. Chat state: ${chatStateRef.current}. Manually Online: ${isManuallyOnline}`);
 
       if (newOfferData) {
         if (!isManuallyOnline) {
@@ -847,8 +912,7 @@ export default function HomePage() {
       removeFirebaseListener(incomingCallDbRef, 'value');
       stopRingingSound();
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentSessionUserIdRef.current, isManuallyOnline, isChatUIVisible]);
+  }, [sessionUser?.id, isManuallyOnline, isChatUIVisible, addFirebaseListener, removeFirebaseListener, playRingingSound, stopRingingSound, toast, addDebugLog]);
 
 
   // Effect 1: Manages currentDirectChatId based on selectedChatPeer
@@ -870,13 +934,13 @@ export default function HomePage() {
       setCurrentDirectChatId(newDirectChatId);
       setDirectChatMessages([]); // Crucial: Clear messages when chat ID changes for the new selection
     }
-  }, [selectedChatPeer, sessionUser, addDebugLog]);
+  }, [selectedChatPeer, sessionUser, addDebugLog, currentDirectChatId]);
 
 
   // Effect 2: Listens for new messages for the currentDirectChatId
   useEffect(() => {
-    if (!currentDirectChatId) {
-      addDebugLog(`Message Listener Effect: No currentDirectChatId. Listener not attached.`);
+    if (!currentDirectChatId || !sessionUser?.id) { // Ensure sessionUser.id is also available
+      addDebugLog(`Message Listener Effect: No currentDirectChatId or sessionUser.id. Listener not attached. ChatID: ${currentDirectChatId}, UserID: ${sessionUser?.id}`);
       return;
     }
 
@@ -889,7 +953,20 @@ export default function HomePage() {
         messages.push({ id: childSnapshot.key!, ...childSnapshot.val() } as ChatMessage);
       });
       setDirectChatMessages(messages);
-      addDebugLog(`Message Listener Effect: Messages updated for ${currentDirectChatId}. Count: ${messages.length}. First message text (if any): ${messages.length > 0 ? messages[0].text : 'N/A'}`);
+      addDebugLog(`Message Listener Effect: Messages updated for ${currentDirectChatId}. Count: ${messages.length}.`);
+      
+      // Update unread status
+      if (messages.length > 0) {
+        const lastMessage = messages[messages.length - 1];
+        if (lastMessage.senderId !== sessionUser?.id && (!selectedChatPeer || lastMessage.senderId !== selectedChatPeer.id)) {
+           if (isPageVisibleRef.current && document.visibilityState === 'visible' && lastMessage.senderId) {
+              if(!selectedChatPeer || selectedChatPeer.id !== lastMessage.senderId){
+                 addDebugLog(`Message Listener: New unread message from ${lastMessage.senderId} in chat ${currentDirectChatId}. Current selected peer: ${selectedChatPeer?.id}`);
+                 setUnreadChats(prev => new Set(prev).add(lastMessage.senderId!));
+              }
+           }
+        }
+      }
     };
 
     addFirebaseListener(directChatMessagesQuery, directChatCallback, 'value');
@@ -899,12 +976,12 @@ export default function HomePage() {
       addDebugLog(`Message Listener Effect: Cleaning up listener for chat ID: ${listenerChatId}`);
       removeFirebaseListener(directChatMessagesQuery, 'value');
     };
-  }, [currentDirectChatId, addFirebaseListener, removeFirebaseListener, addDebugLog]);
+  }, [currentDirectChatId, addFirebaseListener, removeFirebaseListener, addDebugLog, sessionUser?.id, selectedChatPeer]);
 
 
   useEffect(() => {
     const handleVisibilityChange = () => {
-      const currentSUser = sessionUser;
+      const currentSUser = sessionUser; // Use the state variable which is correctly typed
       if (!currentSUser || !currentSUser.id) {
         addDebugLog("Page Visibility: No currentSUser or currentSUser.id.");
         return;
@@ -1032,13 +1109,10 @@ export default function HomePage() {
   const handleJoinCreatedRoom = () => {
     if (createdRoomId && roomLink) {
       addDebugLog(`Attempting to open room link in new tab: ${roomLink}`);
-      // Try to open the link in a new tab.
-      // 'noopener,noreferrer' are for security and to prevent the new page from accessing window.opener.
       const newWindow = window.open(roomLink, '_blank', 'noopener,noreferrer');
       if (newWindow) {
-        newWindow.focus(); // Try to bring the new tab to the front.
+        newWindow.focus(); 
       } else {
-        // This might happen if pop-ups are aggressively blocked.
         addDebugLog("Failed to open room link in new tab, possibly due to pop-up blocker. Falling back to same tab or alerting user.");
         toast({ title: "Pop-up Blocked?", description: "Could not open room in a new tab. Please check your pop-up blocker or copy the link.", variant: "default" });
       }
@@ -1208,8 +1282,6 @@ export default function HomePage() {
                 <ChatContactList
                   peers={activeChatPeers.filter(p => p.id !== sessionUser?.id)}
                   selectedPeerId={selectedChatPeer.id}
-                  currentUserId={sessionUser.id}
-                  unreadChats={unreadChats}
                   onSelectPeer={(peer) => {
                     addDebugLog(`ChatContactList onSelectPeer: Selected ${peer.name} (${peer.id})`);
                     setSelectedChatPeer(peer);
@@ -1217,6 +1289,7 @@ export default function HomePage() {
                     setUnreadChats(prev => { const newSet = new Set(prev); newSet.delete(peer.id); return newSet; });
                   }}
                   onCloseChatList={() => {setIsChatUIVisible(false); setSelectedChatPeer(null);}}
+                  unreadChats={unreadChats} // Pass unreadChats prop
                 />
               </div>
               <div className="flex-1 h-full border-l">
@@ -1238,19 +1311,19 @@ export default function HomePage() {
         return (
           <div className="flex flex-col items-center gap-6 p-6 bg-card rounded-xl shadow-xl w-full max-w-lg">
             <Card className="w-full shadow-md border-primary/50">
-              <CardHeader className="items-center text-center pb-4">
-                <Avatar className="w-20 h-20 mb-3 border-2 border-primary shadow-sm">
+              <CardHeader className="items-center text-center p-2">
+                <Avatar className="w-12 h-12 mb-1 border-2 border-primary shadow-sm">
                   <AvatarImage src={sessionUser.photoUrl} alt={sessionUser.name} data-ai-hint={sessionUser.dataAiHint || "avatar abstract"} />
                   <AvatarFallback>{sessionUser.name.charAt(0).toUpperCase()}</AvatarFallback>
                 </Avatar>
-                <CardTitle className="text-xl">
+                <CardTitle className="text-lg">
                   {sessionUser.name}
                   {sessionUser.isGoogleUser && <span className="text-xs text-primary font-semibold ml-1">(Google)</span>}
                   {sessionUser.countryCode && ` (${sessionUser.countryCode})`}
                 </CardTitle>
-                <CardDescription className="text-sm text-muted-foreground">Your current ID: {sessionUser.id.substring(0,8)}...</CardDescription>
+                <CardDescription className="text-xs text-muted-foreground">Your current ID: {sessionUser.id.substring(0,8)}...</CardDescription>
               </CardHeader>
-              <CardContent className="pt-0 pb-4 flex justify-center">
+              <CardContent className="pt-0 pb-2 flex justify-center">
                  <Button onClick={handleToggleOnlineStatus} variant={isManuallyOnline ? "outline" : "default"} size="sm">
                   {isManuallyOnline ? <WifiOff className="mr-2 h-4 w-4" /> : <Wifi className="mr-2 h-4 w-4" />}
                   {isManuallyOnline ? "Go Offline" : "Go Online"}
@@ -1469,3 +1542,5 @@ export default function HomePage() {
     </MainLayout>
   );
 }
+
+    
