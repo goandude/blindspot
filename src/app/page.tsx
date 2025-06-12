@@ -654,25 +654,29 @@ export default function HomePage() {
     toast({ title: "Connecting...", description: `Connecting to ${offerData.callerName}...` });
     
     try {
-      addDebugLog(`Callee ${sUser.id}: Setting remote description (offer) from ${offerData.callerId} for room ${offerData.roomId}.`);
+      addDebugLog(`Callee ${sUser.id}: Setting remote description (offer) from ${offerData.callerId} for room ${offerData.roomId}. Offer: ${JSON.stringify(offerData.offer).substring(0,100)}...`);
       await pc.setRemoteDescription(new RTCSessionDescription(offerData.offer));
       addDebugLog(`Callee ${sUser.id}: Remote desc (offer) set for room ${offerData.roomId}. Creating answer.`);
+      
       const answer = await pc.createAnswer();
-      addDebugLog(`Callee ${sUser.id}: Answer created for room ${offerData.roomId}. Setting local description.`);
+      addDebugLog(`Callee ${sUser.id}: Answer created for room ${offerData.roomId}. Setting local description. Answer: ${JSON.stringify(answer).substring(0,100)}...`);
       await pc.setLocalDescription(answer);
       addDebugLog(`Callee ${sUser.id}: Local desc (answer) set for room ${offerData.roomId}.`);
+      
       const answerPayload: CallAnswer = {
         answer: pc.localDescription!.toJSON(), calleeId: sUser.id, calleeIsGoogleUser: sUser.isGoogleUser || false,
       };
       const answerPath = `callSignals/${offerData.roomId}/answer`;
-      addDebugLog(`Callee ${sUser.id}: Sending answer to room ${offerData.roomId}.`);
+      addDebugLog(`Callee ${sUser.id}: Sending answer to room ${offerData.roomId}. Payload: ${JSON.stringify(answerPayload).substring(0,100)}...`);
       await set(ref(db, answerPath), answerPayload);
       addDebugLog(`Callee ${sUser.id}: Answer sent to room ${offerData.roomId}.`);
+      
       const myOfferPath = `callSignals/${sUser.id}/pendingOffer`;
       await remove(ref(db, myOfferPath));
       addDebugLog(`Callee ${sUser.id}: Removed processed pending offer from ${myOfferPath}.`);
       
       const callerIceCandidatesRefPath = `iceCandidates/${offerData.roomId}/${offerData.callerId}`;
+      addDebugLog(`Callee ${sUser.id}: Added Firebase listener for caller's ICE candidates at ${callerIceCandidatesRefPath}`);
       addFirebaseListener(ref(db, callerIceCandidatesRefPath), (snapshot: any) => {
         snapshot.forEach((childSnapshot: any) => {
           const candidate = childSnapshot.val();
@@ -758,23 +762,13 @@ export default function HomePage() {
       set(ref(db, userOnlinePath), presenceData)
         .then(() => addDebugLog(`Set user ${sUser.id} online in DB.`))
         .catch(e => addDebugLog(`Error setting user ${sUser.id} online: ${e.message}`));
-
-      if (!sUser.isGoogleUser && anonymousSessionId === sUser.id) {
-        const userStatusDbRef = ref(db, userOnlinePath);
-        if (userStatusDbRef && typeof userStatusDbRef.onDisconnect === 'function') {
-          userStatusDbRef.onDisconnect().remove()
-            .then(() => addDebugLog(`onDisconnect().remove() set for anonymous user ${sUser.id}.`))
-            .catch(e => addDebugLog(`Error setting onDisconnect for anonymous ${sUser.id}: ${e.message}`));
-        } else {
-           addDebugLog(`ERROR - userStatusDbRef or onDisconnect not valid for anon ${sUser.id} in updateUserOnlineStatus. Ref: ${userStatusDbRef}`);
-        }
-      }
     } else {
       remove(ref(db, userOnlinePath))
         .then(() => addDebugLog(`Removed user ${sUser.id} from online list.`))
         .catch(e => addDebugLog(`Error removing user ${sUser.id} from online list: ${e.message}`));
     }
-  }, [sessionUser, anonymousSessionId, addDebugLog]);
+  }, [sessionUser, addDebugLog]);
+
 
   const handleToggleOnlineStatus = () => {
     const newOnlineStatus = !isManuallyOnline;
@@ -802,6 +796,8 @@ export default function HomePage() {
     addDebugLog(`Anonymous Presence (connection): Setting up for ${myId}. Name: ${sessionUser.name}, Country: ${sessionUser.countryCode}`);
 
     const connectedDbRef = ref(db, '.info/connected');
+    const userStatusDbRef = ref(db, `onlineUsers/${myId}`); // Define userStatusDbRef here for anon users
+    
     const presenceCb = (snapshot: any) => {
       if (!currentSessionUserIdRef.current || currentSessionUserIdRef.current !== myId || authCurrentUser) {
         addDebugLog(`Anonymous Presence (connection) for ${myId}: Skipping update. Current user ref ${currentSessionUserIdRef.current} or authUser ${authCurrentUser?.uid} exists.`);
@@ -812,6 +808,14 @@ export default function HomePage() {
         if (isManuallyOnline && isPageVisibleRef.current) {
            updateUserOnlineStatus(true); 
         }
+        // Set up onDisconnect for anonymous users only when they are truly connected
+        if (userStatusDbRef && typeof userStatusDbRef.onDisconnect === 'function') {
+          userStatusDbRef.onDisconnect().remove()
+            .then(() => addDebugLog(`onDisconnect().remove() set for anonymous user ${myId}.`))
+            .catch(e => addDebugLog(`Error setting onDisconnect for anonymous ${myId}: ${e.message}`));
+        } else {
+          addDebugLog(`ERROR - userStatusDbRef or onDisconnect not valid for anon ${myId} in .info/connected callback. Ref: ${userStatusDbRef}`);
+        }
       } else {
         addDebugLog(`Anonymous Presence (connection): Firebase connection lost for ${myId}. onDisconnect should handle removal.`);
       }
@@ -820,6 +824,10 @@ export default function HomePage() {
     return () => {
       addDebugLog(`Anonymous Presence (connection): Cleaning up for ${myId}. Detaching .info/connected listener.`);
       removeFirebaseListener(connectedDbRef, 'value');
+      // Optionally remove onDisconnect explicitly if desired, though Firebase handles it
+      // if (userStatusDbRef && typeof userStatusDbRef.onDisconnect === 'function') {
+      //   userStatusDbRef.onDisconnect().cancel();
+      // }
     };
   }, [authCurrentUser, anonymousSessionId, sessionUser, addFirebaseListener, removeFirebaseListener, addDebugLog, isManuallyOnline, updateUserOnlineStatus]);
 
@@ -846,7 +854,7 @@ export default function HomePage() {
   }, [addFirebaseListener, removeFirebaseListener, addDebugLog]);
 
   useEffect(() => {
-    const myId = sessionUser?.id; // Use sessionUser.id directly
+    const myId = sessionUser?.id; 
     if (!myId) {
       addDebugLog(`Incoming call listener: No active user ID (sessionUser.id is ${myId}).`);
       if (incomingCallOfferDetailsRef.current) {
