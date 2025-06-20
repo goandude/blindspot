@@ -18,6 +18,18 @@ const nextConfig: NextConfig = {
       },
     ],
   },
+async rewrites() {
+    return [
+      {
+        source: "/__/auth/:path*",
+        destination: `https://astute-helper-451908-q3.firebaseapp.com/__/auth/:path*`, // Replace with your actual authDomain
+      },
+    ];
+  },
+
+
+
+
 };
 
 export default nextConfig;
