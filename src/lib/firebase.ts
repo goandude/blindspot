@@ -7,8 +7,8 @@ import { getStorage, type FirebaseStorage } from "firebase/storage"; // Added fo
 // IMPORTANT: Replace placeholder values with your actual Firebase configuration
 const firebaseConfig = {
   apiKey: "AIzaSyDphKB2KnXoOQSNhcGhLrk0LLw3SqgwXwQ",
- // authDomain: "astute-helper-451908-q3.firebaseapp.com",
-  authDomain: "blindspot-gray.vercel.app",
+ authDomain: "astute-helper-451908-q3.firebaseapp.com",
+  //authDomain: "blindspot-gray.vercel.app",
   databaseURL: "https://astute-helper-451908-q3-default-rtdb.firebaseio.com",
   projectId: "astute-helper-451908-q3",
   storageBucket: "astute-helper-451908-q3.appspot.com", // Ensure this is correct for storage
